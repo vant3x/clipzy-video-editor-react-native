@@ -18,12 +18,14 @@ export const Colors = {
     tabIconSelected: tintColorLight,
   },
   dark: {
-    text: '#ECEDEE',
-    background: '#151718',
-    tint: tintColorDark,
-    icon: '#9BA1A6',
-    tabIconDefault: '#9BA1A6',
-    tabIconSelected: tintColorDark,
+    text: '#FFFFFF',
+    background: '#090A0C', // Very dark slate
+    tint: '#3B82F6', // A vibrant blue for actions
+    icon: '#A1A1AA',
+    tabIconDefault: '#71717A',
+    tabIconSelected: '#3B82F6',
+    card: '#181A1F', // Slightly lighter for glass/cards
+    border: '#272A30',
   },
 };
 
