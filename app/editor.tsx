@@ -10,7 +10,8 @@ import { useVideoPlayer, VideoView } from 'expo-video';
 import Slider from '@react-native-community/slider';
 import * as FileSystem from 'expo-file-system';
 import * as MediaLibrary from 'expo-media-library';
-import { processVideo } from '@/utils/ffmpeg';
+import { processVideo, getVideoMetadata } from '@/utils/ffmpeg';
+import { RangeSlider } from '@/components/ui/RangeSlider';
 
 type Tool = 'trim' | 'speed' | 'color' | null;
 
@@ -33,6 +34,37 @@ export default function EditorScreen() {
   const [speed, setSpeed] = useState<number>(1.0);
   const [brightness, setBrightness] = useState<number>(0);
   const [contrast, setContrast] = useState<number>(1.0);
+  const [trimStart, setTrimStart] = useState<number>(0);
+  const [trimEnd, setTrimEnd] = useState<number>(0);
+  const [videoDuration, setVideoDuration] = useState<number>(0);
+
+  useEffect(() => {
+    if (uri) {
+      getVideoMetadata(uri).then(metadata => {
+        if (metadata && metadata.duration) {
+          setVideoDuration(metadata.duration);
+          setTrimEnd(metadata.duration);
+        }
+      });
+    }
+  }, [uri]);
+
+  // Loop playback within trimmed range
+  useEffect(() => {
+    let interval: NodeJS.Timeout;
+    if (isPlaying && activeTool === 'trim' && videoDuration > 0) {
+      interval = setInterval(() => {
+        if (player) {
+          if (player.currentTime >= trimEnd) {
+            player.currentTime = trimStart;
+          } else if (player.currentTime < trimStart) {
+            player.currentTime = trimStart;
+          }
+        }
+      }, 100);
+    }
+    return () => clearInterval(interval);
+  }, [isPlaying, activeTool, trimStart, trimEnd, player, videoDuration]);
   
   // Export states
   const [exportResolution, setExportResolution] = useState<string>('Original'); // 'Original', '1280x720', '1920x1080', '3840x2160'
@@ -81,6 +113,10 @@ export default function EditorScreen() {
         speed: speed,
         color: { brightness, contrast, saturation: 1 }
       };
+
+      if (trimStart > 0 || trimEnd < videoDuration) {
+        options.trim = { start: trimStart, end: trimEnd };
+      }
 
       if (exportResolution !== 'Original') {
         options.resolution = exportResolution;
@@ -158,11 +194,43 @@ export default function EditorScreen() {
     }
 
     if (activeTool === 'trim') {
+      const formatTime = (seconds: number) => {
+        const m = Math.floor(seconds / 60);
+        const s = Math.floor(seconds % 60);
+        return `${m}:${s < 10 ? '0' : ''}${s}`;
+      };
+
       return (
         <View style={styles.toolOptionsContainer}>
           <ThemedText style={styles.toolTitle}>Trim Video</ThemedText>
-          <ThemedText style={styles.sliderLabel}>Note: Advanced trimming timeline will be added. Set via FFmpeg directly for now.</ThemedText>
-          {/* A fully functional range slider is complex in pure RN without extra libs. We'll add basic logic for it later. */}
+          {videoDuration > 0 ? (
+            <View style={{ width: '100%', paddingHorizontal: 10 }}>
+              <View style={{ flexDirection: 'row', justifyContent: 'space-between', marginBottom: 10 }}>
+                <ThemedText style={styles.sliderLabel}>Start: {formatTime(trimStart)}</ThemedText>
+                <ThemedText style={styles.sliderLabel}>End: {formatTime(trimEnd)}</ThemedText>
+              </View>
+              <RangeSlider 
+                min={0} 
+                max={videoDuration} 
+                initialLow={trimStart} 
+                initialHigh={trimEnd} 
+                onValueChanged={(low, high) => {
+                  setTrimStart(low);
+                  setTrimEnd(high);
+                  if (player) {
+                    player.currentTime = low;
+                  }
+                }}
+                onValuesChanging={(low, high) => {
+                  setTrimStart(low);
+                  setTrimEnd(high);
+                }}
+                activeColor={activeColor}
+              />
+            </View>
+          ) : (
+            <ActivityIndicator color={activeColor} />
+          )}
         </View>
       );
     }
