@@ -12,8 +12,9 @@ import * as FileSystem from 'expo-file-system';
 import * as MediaLibrary from 'expo-media-library';
 import { processVideo, getVideoMetadata } from '@/utils/ffmpeg';
 import { RangeSlider } from '@/components/ui/RangeSlider';
+import { TransformCanvas, TransformState } from '@/components/ui/TransformCanvas';
 
-type Tool = 'trim' | 'speed' | 'color' | null;
+type Tool = 'trim' | 'speed' | 'color' | 'format' | null;
 
 export default function EditorScreen() {
   const { uri } = useLocalSearchParams<{ uri: string }>();
@@ -38,6 +39,13 @@ export default function EditorScreen() {
   const [trimStart, setTrimStart] = useState<number>(0);
   const [trimEnd, setTrimEnd] = useState<number>(0);
   const [videoDuration, setVideoDuration] = useState<number>(0);
+  const [videoWidth, setVideoWidth] = useState<number>(0);
+  const [videoHeight, setVideoHeight] = useState<number>(0);
+
+  // Transform states
+  const [aspectRatio, setAspectRatio] = useState<string>('Original');
+  const [transform, setTransform] = useState<TransformState>({ scale: 1, translateX: 0, translateY: 0, rotation: 0 });
+  const [resetTrigger, setResetTrigger] = useState<number>(0);
 
   useEffect(() => {
     if (uri) {
@@ -45,6 +53,8 @@ export default function EditorScreen() {
         if (metadata && metadata.duration) {
           setVideoDuration(metadata.duration);
           setTrimEnd(metadata.duration);
+          setVideoWidth(metadata.width);
+          setVideoHeight(metadata.height);
         }
       });
     }
@@ -112,7 +122,14 @@ export default function EditorScreen() {
       
       const options: any = {
         speed: speed,
-        color: { brightness, contrast, saturation }
+        color: { brightness, contrast, saturation },
+        transform: {
+          scale: transform.scale,
+          translateX: transform.translateX,
+          translateY: transform.translateY,
+          rotation: transform.rotation,
+          targetRatio: aspectRatio
+        }
       };
 
       if (trimStart > 0 || trimEnd < videoDuration) {
@@ -248,6 +265,31 @@ export default function EditorScreen() {
       );
     }
 
+    if (activeTool === 'format') {
+      return (
+        <View style={styles.toolOptionsContainer}>
+          <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
+            <ThemedText style={styles.toolTitle}>Aspect Ratio</ThemedText>
+            <TouchableOpacity onPress={() => setResetTrigger(prev => prev + 1)} style={{ padding: 4, backgroundColor: '#333', borderRadius: 4, flexDirection: 'row', alignItems: 'center', gap: 4 }}>
+              <Ionicons name="refresh-outline" size={16} color="#FFF" />
+              <Text style={{ color: '#FFF', fontSize: 12 }}>Reset</Text>
+            </TouchableOpacity>
+          </View>
+          <View style={{ flexDirection: 'row', justifyContent: 'space-around' }}>
+            {['Original', '16:9', '9:16', '1:1'].map((fmt) => (
+              <TouchableOpacity 
+                key={fmt} 
+                style={[{ paddingVertical: 8, paddingHorizontal: 16, borderRadius: 20, backgroundColor: '#333' }, aspectRatio === fmt && { backgroundColor: activeColor }]}
+                onPress={() => setAspectRatio(fmt)}
+              >
+                <Text style={[{ color: '#AAA', fontWeight: 'bold' }, aspectRatio === fmt && { color: '#FFF' }]}>{fmt}</Text>
+              </TouchableOpacity>
+            ))}
+          </View>
+        </View>
+      );
+    }
+
     return (
       <View style={styles.controlsContainer}>
         <TouchableOpacity onPress={togglePlayPause} style={styles.playButton}>
@@ -275,12 +317,13 @@ export default function EditorScreen() {
 
       <View style={styles.videoContainer}>
         {uri ? (
-          <VideoView
-            style={styles.video}
+          <TransformCanvas 
             player={player}
-            allowsFullscreen={false}
-            allowsPictureInPicture={false}
-            nativeControls={false}
+            aspectRatio={aspectRatio}
+            videoWidth={videoWidth}
+            videoHeight={videoHeight}
+            onTransformChange={setTransform}
+            resetTrigger={resetTrigger}
           />
         ) : (
           <View style={styles.placeholderVideo}>
@@ -301,6 +344,14 @@ export default function EditorScreen() {
             label="Trim" 
             isActive={activeTool === 'trim'} 
             onPress={() => setActiveTool(activeTool === 'trim' ? null : 'trim')} 
+            activeColor={activeColor} 
+            isDark={isDark} 
+          />
+          <ToolbarButton 
+            icon="crop-outline" 
+            label="Format" 
+            isActive={activeTool === 'format'} 
+            onPress={() => setActiveTool(activeTool === 'format' ? null : 'format')} 
             activeColor={activeColor} 
             isDark={isDark} 
           />

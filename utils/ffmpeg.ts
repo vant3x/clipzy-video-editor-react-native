@@ -64,6 +64,15 @@ export interface EditOptions {
   color?: { brightness?: number; contrast?: number; saturation?: number };
   resolution?: string; // e.g. '1920x1080', '3840x2160'
   fps?: number; // e.g. 30, 60
+  transform?: {
+    scale?: number;
+    translateX?: number;
+    translateY?: number;
+    rotation?: number;
+    targetRatio?: string;
+    canvasWidth?: number;
+    canvasHeight?: number;
+  };
 }
 
 export const processVideo = async (inputUri: string, outputUri: string, options: EditOptions): Promise<boolean> => {
@@ -95,6 +104,43 @@ export const processVideo = async (inputUri: string, outputUri: string, options:
     // FFmpeg eq filter values: brightness [-1.0, 1.0], contrast [-1000.0, 1000.0], saturation [0.0, 3.0]
     // To make it simple, we assume the UI provides mapped values or we map them here.
     videoFilters.push(`eq=brightness=${brightness}:contrast=${contrast}:saturation=${saturation}`);
+  }
+
+  // 4. Transform (Format, Scale, Rotate, Pan)
+  if (options.transform) {
+    const { 
+      scale = 1, 
+      translateX = 0, 
+      translateY = 0, 
+      rotation = 0, 
+      targetRatio = 'Original', 
+      canvasWidth = 1, 
+      canvasHeight = 1 
+    } = options.transform;
+
+    if (Math.abs(rotation) > 0.01) {
+      videoFilters.push(`rotate=${rotation}:c=black:ow='rotw(${rotation})':oh='roth(${rotation})'`);
+    }
+
+    if (Math.abs(scale - 1) > 0.01) {
+      videoFilters.push(`scale=iw*${scale}:ih*${scale}`);
+    }
+
+    if (targetRatio !== 'Original' || Math.abs(translateX) > 1 || Math.abs(translateY) > 1) {
+      let ratioStr = 'dar';
+      if (targetRatio === '16:9') ratioStr = '16/9';
+      else if (targetRatio === '9:16') ratioStr = '9/16';
+      else if (targetRatio === '1:1') ratioStr = '1/1';
+
+      const normX = translateX / canvasWidth;
+      const normY = translateY / canvasHeight;
+
+      const padFilter = `pad=width='max(iw\\,ih*(${ratioStr}))':height='max(ih\\,iw/(${ratioStr}))':x='(ow-iw)/2+(${normX}*ow)':y='(oh-ih)/2+(${normY}*oh)':color=black`;
+      videoFilters.push(padFilter);
+
+      const cropFilter = `crop=w='min(iw\\,ih*(${ratioStr}))':h='min(ih\\,iw/(${ratioStr}))':x='(iw-ow)/2':y='(ih-oh)/2'`;
+      videoFilters.push(cropFilter);
+    }
   }
 
   // Construct filter strings
