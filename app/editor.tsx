@@ -34,6 +34,7 @@ export default function EditorScreen() {
   const [speed, setSpeed] = useState<number>(1.0);
   const [brightness, setBrightness] = useState<number>(0);
   const [contrast, setContrast] = useState<number>(1.0);
+  const [saturation, setSaturation] = useState<number>(1.0);
   const [trimStart, setTrimStart] = useState<number>(0);
   const [trimEnd, setTrimEnd] = useState<number>(0);
   const [videoDuration, setVideoDuration] = useState<number>(0);
@@ -111,7 +112,7 @@ export default function EditorScreen() {
       
       const options: any = {
         speed: speed,
-        color: { brightness, contrast, saturation: 1 }
+        color: { brightness, contrast, saturation }
       };
 
       if (trimStart > 0 || trimEnd < videoDuration) {
@@ -185,6 +186,18 @@ export default function EditorScreen() {
             maximumValue={2}
             value={contrast}
             onValueChange={setContrast}
+            minimumTrackTintColor={activeColor}
+            maximumTrackTintColor={isDark ? '#333' : '#ddd'}
+            thumbTintColor={activeColor}
+          />
+
+          <ThemedText style={styles.sliderLabel}>Saturation: {saturation.toFixed(2)}</ThemedText>
+          <Slider
+            style={{width: '100%', height: 40}}
+            minimumValue={0}
+            maximumValue={3}
+            value={saturation}
+            onValueChange={setSaturation}
             minimumTrackTintColor={activeColor}
             maximumTrackTintColor={isDark ? '#333' : '#ddd'}
             thumbTintColor={activeColor}
