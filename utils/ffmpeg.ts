@@ -1,4 +1,4 @@
-import { FFmpegKit, FFprobeKit, ReturnCode } from 'ffmpeg-kit-react-native';
+import { FFmpegKit, FFprobeKit, ReturnCode } from '@ruslan-aktaev/ffmpeg-kit-react-native';
 
 export interface VideoMetadata {
   duration: number;
