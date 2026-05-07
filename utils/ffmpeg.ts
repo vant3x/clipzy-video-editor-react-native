@@ -12,7 +12,7 @@ export const getVideoMetadata = async (uri: string): Promise<VideoMetadata | nul
     const info = await session.getMediaInformation();
 
     if (info) {
-      const duration = parseFloat(info.getDuration());
+      const duration = Number(info.getDuration());
       const streams = info.getStreams();
       let width = 0;
       let height = 0;
@@ -73,6 +73,7 @@ export interface EditOptions {
     canvasWidth?: number;
     canvasHeight?: number;
   };
+  musicUri?: string;
 }
 
 export const processVideo = async (inputUri: string, outputUri: string, options: EditOptions): Promise<boolean> => {
@@ -144,12 +145,26 @@ export const processVideo = async (inputUri: string, outputUri: string, options:
   }
 
   // Construct filter strings
-  if (videoFilters.length > 0) {
-    filterGraph += `-vf "${videoFilters.join(',')}" `;
-  }
+  let filterComplex = '';
+  let mapArgs = '';
   
-  if (audioFilters.length > 0) {
-    filterGraph += `-af "${audioFilters.join(',')}" `;
+  if (options.musicUri) {
+    let videoFilterStr = videoFilters.length > 0 ? `[0:v]${videoFilters.join(',')}[vout];` : '';
+    let audioFilterStr = audioFilters.length > 0 ? `[0:a]${audioFilters.join(',')}[a0];` : '';
+    
+    let amixInput1 = audioFilters.length > 0 ? '[a0]' : '[0:a]';
+    // amix duration=first ensures the audio stops when the original video ends
+    let audioMixStr = `${amixInput1}[1:a]amix=inputs=2:duration=first:dropout_transition=2[aout]`;
+    
+    filterComplex = `-filter_complex "${videoFilterStr}${audioFilterStr}${audioMixStr}"`;
+    mapArgs = `-map ${videoFilters.length > 0 ? '"[vout]"' : '0:v'} -map "[aout]"`;
+  } else {
+    if (videoFilters.length > 0) {
+      filterGraph += `-vf "${videoFilters.join(',')}" `;
+    }
+    if (audioFilters.length > 0) {
+      filterGraph += `-af "${audioFilters.join(',')}" `;
+    }
   }
 
   // Construct full command
@@ -166,7 +181,17 @@ export const processVideo = async (inputUri: string, outputUri: string, options:
   
   outputOptions += ` -c:a aac`;
 
-  const command = `-y ${inputOptions} -i "${inputUri}" ${filterGraph}${outputOptions} "${outputUri}"`;
+  let inputOptionsStr = `-y ${inputOptions} -i "${inputUri}"`;
+  if (options.musicUri) {
+    inputOptionsStr += ` -i "${options.musicUri}"`;
+  }
+
+  let finalCommand = '';
+  if (options.musicUri) {
+    finalCommand = `${inputOptionsStr} ${filterComplex} ${mapArgs} ${outputOptions} "${outputUri}"`;
+  } else {
+    finalCommand = `${inputOptionsStr} ${filterGraph}${outputOptions} "${outputUri}"`;
+  }
   
-  return await executeFFmpeg(command);
+  return await executeFFmpeg(finalCommand);
 };

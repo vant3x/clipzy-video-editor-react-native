@@ -8,13 +8,14 @@ import { Colors } from '@/constants/theme';
 import { useColorScheme } from '@/hooks/use-color-scheme';
 import { useVideoPlayer, VideoView } from 'expo-video';
 import Slider from '@react-native-community/slider';
-import * as FileSystem from 'expo-file-system';
+import { Paths } from 'expo-file-system';
 import * as MediaLibrary from 'expo-media-library';
+import * as DocumentPicker from 'expo-document-picker';
 import { processVideo, getVideoMetadata } from '@/utils/ffmpeg';
 import { RangeSlider } from '@/components/ui/RangeSlider';
 import { TransformCanvas, TransformState } from '@/components/ui/TransformCanvas';
 
-type Tool = 'trim' | 'speed' | 'color' | 'format' | null;
+type Tool = 'trim' | 'speed' | 'color' | 'format' | 'music' | null;
 
 export default function EditorScreen() {
   const { uri } = useLocalSearchParams<{ uri: string }>();
@@ -41,6 +42,10 @@ export default function EditorScreen() {
   const [videoDuration, setVideoDuration] = useState<number>(0);
   const [videoWidth, setVideoWidth] = useState<number>(0);
   const [videoHeight, setVideoHeight] = useState<number>(0);
+
+  // Music state
+  const [musicUri, setMusicUri] = useState<string | null>(null);
+  const [musicName, setMusicName] = useState<string | null>(null);
 
   // Transform states
   const [aspectRatio, setAspectRatio] = useState<string>('Original');
@@ -118,7 +123,7 @@ export default function EditorScreen() {
     try {
       setIsExporting(true);
       
-      const outputUri = `${FileSystem.cacheDirectory}output_${Date.now()}.mp4`;
+      const outputUri = `${Paths.cache.uri}output_${Date.now()}.mp4`;
       
       const options: any = {
         speed: speed,
@@ -131,6 +136,10 @@ export default function EditorScreen() {
           targetRatio: aspectRatio
         }
       };
+
+      if (musicUri) {
+        options.musicUri = musicUri;
+      }
 
       if (trimStart > 0 || trimEnd < videoDuration) {
         options.trim = { start: trimStart, end: trimEnd };
@@ -290,6 +299,49 @@ export default function EditorScreen() {
       );
     }
 
+    if (activeTool === 'music') {
+      const pickAudio = async () => {
+        try {
+          const result = await DocumentPicker.getDocumentAsync({
+            type: 'audio/*',
+            copyToCacheDirectory: true,
+          });
+          if (!result.canceled && result.assets && result.assets.length > 0) {
+            setMusicUri(result.assets[0].uri);
+            setMusicName(result.assets[0].name);
+          }
+        } catch (err) {
+          console.log('Error picking audio', err);
+        }
+      };
+
+      return (
+        <View style={styles.toolOptionsContainer}>
+          <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
+            <ThemedText style={styles.toolTitle}>Background Music</ThemedText>
+            {musicUri && (
+              <TouchableOpacity onPress={() => { setMusicUri(null); setMusicName(null); }} style={{ padding: 4, backgroundColor: '#333', borderRadius: 4, flexDirection: 'row', alignItems: 'center', gap: 4 }}>
+                <Ionicons name="trash-outline" size={16} color="#ef4444" />
+                <Text style={{ color: '#ef4444', fontSize: 12 }}>Remove</Text>
+              </TouchableOpacity>
+            )}
+          </View>
+          <View style={{ alignItems: 'center' }}>
+            <TouchableOpacity 
+              style={[styles.button, { backgroundColor: isDark ? Colors.dark.tint : Colors.light.tint, width: 'auto', paddingHorizontal: 20, paddingVertical: 12, flexDirection: 'row', gap: 8, alignItems: 'center', borderRadius: 16 }]} 
+              onPress={pickAudio}
+            >
+              <Ionicons name="musical-notes-outline" size={20} color="#FFF" />
+              <ThemedText style={{ color: '#FFF', fontSize: 16, fontWeight: 'bold' }}>{musicUri ? 'Change Audio' : 'Select Audio File'}</ThemedText>
+            </TouchableOpacity>
+            {musicName && (
+              <ThemedText style={{ marginTop: 12, fontSize: 12, color: '#AAA' }} numberOfLines={1}>Selected: {musicName}</ThemedText>
+            )}
+          </View>
+        </View>
+      );
+    }
+
     return (
       <View style={styles.controlsContainer}>
         <TouchableOpacity onPress={togglePlayPause} style={styles.playButton}>
@@ -368,6 +420,14 @@ export default function EditorScreen() {
             label="Color" 
             isActive={activeTool === 'color'} 
             onPress={() => setActiveTool(activeTool === 'color' ? null : 'color')} 
+            activeColor={activeColor} 
+            isDark={isDark} 
+          />
+          <ToolbarButton 
+            icon="musical-notes-outline" 
+            label="Music" 
+            isActive={activeTool === 'music'} 
+            onPress={() => setActiveTool(activeTool === 'music' ? null : 'music')} 
             activeColor={activeColor} 
             isDark={isDark} 
           />
@@ -613,6 +673,18 @@ const styles = StyleSheet.create({
     paddingHorizontal: 24,
     borderRadius: 8,
     justifyContent: 'center',
+  },
+  button: {
+    paddingVertical: 12,
+    paddingHorizontal: 24,
+    borderRadius: 8,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  buttonText: {
+    color: '#FFF',
+    fontSize: 16,
+    fontWeight: 'bold',
   },
 });
 
