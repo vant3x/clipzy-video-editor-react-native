@@ -12,6 +12,7 @@ import { Paths } from 'expo-file-system';
 import * as MediaLibrary from 'expo-media-library';
 import * as DocumentPicker from 'expo-document-picker';
 import * as ImagePicker from 'expo-image-picker';
+import DraggableFlatList, { ScaleDecorator } from 'react-native-draggable-flatlist';
 import { processVideo, getVideoMetadata, generateThumbnails } from '@/utils/ffmpeg';
 import { RangeSlider } from '@/components/ui/RangeSlider';
 import { TransformCanvas, TransformState } from '@/components/ui/TransformCanvas';
@@ -407,21 +408,37 @@ export default function EditorScreen() {
 
       {clips.length > 1 && (
         <View style={{ paddingHorizontal: 16, paddingBottom: 10 }}>
-          <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ gap: 8 }}>
-            {clips.map((c, i) => (
-               <TouchableOpacity 
-                 key={i} 
-                 onPress={() => setActiveClipIndex(i)} 
-                 style={{ 
-                   paddingVertical: 6, paddingHorizontal: 12, 
-                   backgroundColor: i === activeClipIndex ? activeColor : '#333',
-                   borderRadius: 12
-                 }}
-               >
-                  <Text style={{ color: '#fff', fontSize: 12, fontWeight: 'bold' }}>Clip {i + 1}</Text>
-               </TouchableOpacity>
-            ))}
-          </ScrollView>
+          <DraggableFlatList
+            horizontal
+            data={clips}
+            onDragEnd={({ data }) => {
+               const currentActiveUri = clips[activeClipIndex];
+               setClips(data);
+               const newIndex = data.indexOf(currentActiveUri);
+               if (newIndex !== -1) setActiveClipIndex(newIndex);
+            }}
+            keyExtractor={(item, index) => `${item}_${index}`}
+            contentContainerStyle={{ gap: 8 }}
+            renderItem={({ item, drag, isActive, getIndex }) => {
+               const i = getIndex() || 0;
+               return (
+                 <ScaleDecorator>
+                   <TouchableOpacity 
+                     onLongPress={drag}
+                     onPress={() => setActiveClipIndex(i)} 
+                     style={{ 
+                       paddingVertical: 6, paddingHorizontal: 12, 
+                       backgroundColor: isActive ? '#555' : (i === activeClipIndex ? activeColor : '#333'),
+                       borderRadius: 12,
+                       elevation: isActive ? 5 : 0
+                     }}
+                   >
+                      <Text style={{ color: '#fff', fontSize: 12, fontWeight: 'bold' }}>Clip {i + 1}</Text>
+                   </TouchableOpacity>
+                 </ScaleDecorator>
+               );
+            }}
+          />
         </View>
       )}
 
