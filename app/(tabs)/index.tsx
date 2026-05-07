@@ -14,16 +14,17 @@ export default function HomeScreen() {
   const pickVideo = async () => {
     const result = await ImagePicker.launchImageLibraryAsync({
       mediaTypes: ['videos'],
-      allowsEditing: false, // We'll do our own editing
+      allowsEditing: false, 
+      allowsMultipleSelection: true,
       quality: 1,
     });
 
     if (!result.canceled && result.assets && result.assets.length > 0) {
-      const videoUri = result.assets[0].uri;
-      // Navigate to editor screen with the video uri
+      const uris = result.assets.map(a => a.uri);
+      // Navigate to editor screen with the video uris
       router.push({
         pathname: '/editor',
-        params: { uri: videoUri }
+        params: { uris: JSON.stringify(uris) }
       });
     }
   };

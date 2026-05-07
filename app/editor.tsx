@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect } from 'react';
+import { useState, useRef, useEffect, useMemo } from 'react';
 import { StyleSheet, View, TouchableOpacity, ScrollView, Text, ActivityIndicator, Alert, Modal } from 'react-native';
 import { useLocalSearchParams, router } from 'expo-router';
 import { ThemedText } from '@/components/themed-text';
@@ -11,16 +11,29 @@ import Slider from '@react-native-community/slider';
 import { Paths } from 'expo-file-system';
 import * as MediaLibrary from 'expo-media-library';
 import * as DocumentPicker from 'expo-document-picker';
-import { processVideo, getVideoMetadata } from '@/utils/ffmpeg';
+import * as ImagePicker from 'expo-image-picker';
+import { processVideo, getVideoMetadata, generateThumbnails } from '@/utils/ffmpeg';
 import { RangeSlider } from '@/components/ui/RangeSlider';
 import { TransformCanvas, TransformState } from '@/components/ui/TransformCanvas';
 
 type Tool = 'trim' | 'speed' | 'color' | 'format' | 'music' | null;
 
 export default function EditorScreen() {
-  const { uri } = useLocalSearchParams<{ uri: string }>();
+  const { uri: singleUri, uris: urisParam } = useLocalSearchParams<{ uri?: string, uris?: string }>();
   const colorScheme = useColorScheme();
   const isDark = colorScheme === 'dark';
+  
+  const initialClips = useMemo(() => {
+    if (urisParam) {
+      try { return JSON.parse(urisParam); } catch (e) {}
+    }
+    if (singleUri) return [singleUri];
+    return [];
+  }, [urisParam, singleUri]);
+
+  const [clips, setClips] = useState<string[]>(initialClips);
+  const [activeClipIndex, setActiveClipIndex] = useState(0);
+  const uri = clips[activeClipIndex] || null;
   
   const player = useVideoPlayer(uri, player => {
     player.loop = true;
@@ -42,6 +55,7 @@ export default function EditorScreen() {
   const [videoDuration, setVideoDuration] = useState<number>(0);
   const [videoWidth, setVideoWidth] = useState<number>(0);
   const [videoHeight, setVideoHeight] = useState<number>(0);
+  const [thumbnails, setThumbnails] = useState<string[]>([]);
 
   // Music state
   const [musicUri, setMusicUri] = useState<string | null>(null);
@@ -54,12 +68,17 @@ export default function EditorScreen() {
 
   useEffect(() => {
     if (uri) {
+      setThumbnails([]); // clear prev thumbs
       getVideoMetadata(uri).then(metadata => {
         if (metadata && metadata.duration) {
           setVideoDuration(metadata.duration);
           setTrimEnd(metadata.duration);
           setVideoWidth(metadata.width);
           setVideoHeight(metadata.height);
+          
+          generateThumbnails(uri, metadata.duration, 8).then(thumbs => {
+             setThumbnails(thumbs);
+          });
         }
       });
     }
@@ -107,9 +126,22 @@ export default function EditorScreen() {
   const handleExport = () => {
     setShowExportModal(true);
   };
+  
+  const handleAddClip = async () => {
+    const result = await ImagePicker.launchImageLibraryAsync({
+      mediaTypes: ['videos'],
+      allowsEditing: false,
+      allowsMultipleSelection: true,
+      quality: 1,
+    });
+    if (!result.canceled && result.assets) {
+      const newUris = result.assets.map(a => a.uri);
+      setClips(prev => [...prev, ...newUris]);
+    }
+  };
 
   const executeExport = async () => {
-    if (!uri) return;
+    if (clips.length === 0) return;
 
     setShowExportModal(false);
 
@@ -152,7 +184,7 @@ export default function EditorScreen() {
         options.fps = parseInt(exportFps, 10);
       }
 
-      const success = await processVideo(uri, outputUri, options);
+      const success = await processVideo(clips, outputUri, options);
 
       if (success) {
         await MediaLibrary.saveToLibraryAsync(outputUri);
@@ -265,6 +297,7 @@ export default function EditorScreen() {
                   setTrimEnd(high);
                 }}
                 activeColor={activeColor}
+                thumbnails={thumbnails}
               />
             </View>
           ) : (
@@ -358,14 +391,39 @@ export default function EditorScreen() {
           <Ionicons name="chevron-back" size={28} color={isDark ? Colors.dark.text : Colors.light.text} />
         </TouchableOpacity>
         <ThemedText style={styles.headerTitle}>Editor</ThemedText>
-        <TouchableOpacity style={styles.iconButton} onPress={handleExport} disabled={isExporting}>
-          {isExporting ? (
-            <ActivityIndicator color={activeColor} />
-          ) : (
-            <Ionicons name="download-outline" size={28} color={activeColor} />
-          )}
-        </TouchableOpacity>
+        <View style={{ flexDirection: 'row', gap: 8 }}>
+          <TouchableOpacity style={styles.iconButton} onPress={handleAddClip} disabled={isExporting}>
+            <Ionicons name="add-circle-outline" size={28} color={isDark ? Colors.dark.text : Colors.light.text} />
+          </TouchableOpacity>
+          <TouchableOpacity style={styles.iconButton} onPress={handleExport} disabled={isExporting}>
+            {isExporting ? (
+              <ActivityIndicator color={activeColor} />
+            ) : (
+              <Ionicons name="download-outline" size={28} color={activeColor} />
+            )}
+          </TouchableOpacity>
+        </View>
       </View>
+
+      {clips.length > 1 && (
+        <View style={{ paddingHorizontal: 16, paddingBottom: 10 }}>
+          <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ gap: 8 }}>
+            {clips.map((c, i) => (
+               <TouchableOpacity 
+                 key={i} 
+                 onPress={() => setActiveClipIndex(i)} 
+                 style={{ 
+                   paddingVertical: 6, paddingHorizontal: 12, 
+                   backgroundColor: i === activeClipIndex ? activeColor : '#333',
+                   borderRadius: 12
+                 }}
+               >
+                  <Text style={{ color: '#fff', fontSize: 12, fontWeight: 'bold' }}>Clip {i + 1}</Text>
+               </TouchableOpacity>
+            ))}
+          </ScrollView>
+        </View>
+      )}
 
       <View style={styles.videoContainer}>
         {uri ? (

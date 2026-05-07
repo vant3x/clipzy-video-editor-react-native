@@ -1,4 +1,6 @@
 import { FFmpegKit, FFprobeKit, ReturnCode } from '@wekor/react-native-ffmpeg';
+import { Paths } from 'expo-file-system';
+import * as FileSystem from 'expo-file-system';
 
 export interface VideoMetadata {
   duration: number;
@@ -76,7 +78,27 @@ export interface EditOptions {
   musicUri?: string;
 }
 
-export const processVideo = async (inputUri: string, outputUri: string, options: EditOptions): Promise<boolean> => {
+export const generateThumbnails = async (uri: string, duration: number, count: number): Promise<string[]> => {
+  const fps = Math.max(0.1, count / Math.max(duration, 1));
+  const outDirName = `thumbs_${Date.now()}`;
+  const outDirPath = `${Paths.cache.uri}${outDirName}/`;
+  
+  await FileSystem.makeDirectoryAsync(outDirPath, { intermediates: true });
+  
+  const command = `-y -i "${uri}" -vf "fps=${fps},scale=120:-1" -q:v 2 "${outDirPath}thumb_%03d.jpg"`;
+  const success = await executeFFmpeg(command);
+  
+  if (success) {
+    const files = await FileSystem.readDirectoryAsync(outDirPath);
+    return files.sort().map(f => `${outDirPath}${f}`);
+  }
+  return [];
+};
+
+export const processVideo = async (inputUris: string | string[], outputUri: string, options: EditOptions): Promise<boolean> => {
+  const urisArray = Array.isArray(inputUris) ? inputUris : [inputUris];
+  const isMultiClip = urisArray.length > 1;
+  const primaryInput = urisArray[0];
   let filterGraph = '';
   let videoFilters: string[] = [];
   let audioFilters: string[] = [];
@@ -148,7 +170,35 @@ export const processVideo = async (inputUri: string, outputUri: string, options:
   let filterComplex = '';
   let mapArgs = '';
   
-  if (options.musicUri) {
+  if (isMultiClip) {
+    // Multi-clip concatenation
+    let videoScaleFilters = '';
+    let concatParts = '';
+    
+    // Scale all clips to match the first clip's resolution roughly (we use 1080x1920 as standard vertical for safety, or 720p)
+    // To be perfectly safe, we scale to 1080x1920 with padding to avoid concat failing due to different sizes
+    for (let i = 0; i < urisArray.length; i++) {
+      videoScaleFilters += `[${i}:v]scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2[v${i}]; `;
+      concatParts += `[v${i}][${i}:a]`;
+    }
+    
+    let concatMix = `${videoScaleFilters}${concatParts}concat=n=${urisArray.length}:v=1:a=1[vout_base][aout_base]; `;
+    
+    // Apply filters to concatenated result
+    let finalVideoStr = videoFilters.length > 0 ? `[vout_base]${videoFilters.join(',')}[vout]; ` : '[vout_base]copy[vout]; ';
+    let finalAudioStr = audioFilters.length > 0 ? `[aout_base]${audioFilters.join(',')}[a0]; ` : '[aout_base]anull[a0]; ';
+    
+    if (options.musicUri) {
+      let audioMixStr = `[a0][${urisArray.length}:a]amix=inputs=2:duration=first:dropout_transition=2[aout]`;
+      filterComplex = `-filter_complex "${concatMix}${finalVideoStr}${finalAudioStr}${audioMixStr}"`;
+    } else {
+      filterComplex = `-filter_complex "${concatMix}${finalVideoStr.replace('; ', '')}"`; // Simplified for MVP
+      // Re-map [a0] to [aout]
+      filterComplex = filterComplex.replace('[vout];', '[vout]; [aout_base]anull[aout]');
+    }
+    mapArgs = `-map "[vout]" -map "[aout]"`;
+    
+  } else if (options.musicUri) {
     let videoFilterStr = videoFilters.length > 0 ? `[0:v]${videoFilters.join(',')}[vout];` : '';
     let audioFilterStr = audioFilters.length > 0 ? `[0:a]${audioFilters.join(',')}[a0];` : '';
     
@@ -181,17 +231,26 @@ export const processVideo = async (inputUri: string, outputUri: string, options:
   
   outputOptions += ` -c:a aac`;
 
-  let inputOptionsStr = `-y ${inputOptions} -i "${inputUri}"`;
+  let inputOptionsStr = '';
+  if (isMultiClip) {
+    inputOptionsStr = urisArray.map(uri => `-i "${uri}"`).join(' ');
+  } else {
+    inputOptionsStr = `-y ${inputOptions} -i "${primaryInput}"`;
+  }
+  
   if (options.musicUri) {
     inputOptionsStr += ` -i "${options.musicUri}"`;
   }
 
   let finalCommand = '';
-  if (options.musicUri) {
+  if (isMultiClip || options.musicUri) {
     finalCommand = `${inputOptionsStr} ${filterComplex} ${mapArgs} ${outputOptions} "${outputUri}"`;
   } else {
     finalCommand = `${inputOptionsStr} ${filterGraph}${outputOptions} "${outputUri}"`;
   }
+  
+  // ensure output options don't conflict, add -y to start
+  finalCommand = `-y ${finalCommand}`;
   
   return await executeFFmpeg(finalCommand);
 };

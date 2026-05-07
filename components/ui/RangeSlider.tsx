@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect } from 'react';
-import { View, StyleSheet, PanResponder, Animated, LayoutChangeEvent } from 'react-native';
+import { View, StyleSheet, PanResponder, Animated, LayoutChangeEvent, Image } from 'react-native';
 
 interface RangeSliderProps {
   min: number;
@@ -10,6 +10,7 @@ interface RangeSliderProps {
   onValuesChanging?: (low: number, high: number) => void;
   activeColor?: string;
   thumbColor?: string;
+  thumbnails?: string[];
 }
 
   export function RangeSlider({ 
@@ -20,7 +21,8 @@ interface RangeSliderProps {
     onValueChanged, 
     onValuesChanging,
     activeColor = '#3B82F6',
-    thumbColor = '#FFFFFF'
+    thumbColor = '#FFFFFF',
+    thumbnails = []
   }: RangeSliderProps) {
   const [width, setWidth] = useState(0);
   const THUMB_SIZE = 24;
@@ -101,7 +103,15 @@ interface RangeSliderProps {
       style={styles.container} 
       onLayout={(e: LayoutChangeEvent) => setWidth(e.nativeEvent.layout.width)}
     >
-      <View style={styles.trackBackground} />
+      <View style={styles.trackBackground}>
+        {thumbnails.length > 0 && (
+          <View style={{ flexDirection: 'row', width: '100%', height: '100%', overflow: 'hidden', borderRadius: 3 }}>
+            {thumbnails.map((uri, index) => (
+              <Image key={index} source={{ uri }} style={{ flex: 1, height: '100%', resizeMode: 'cover' }} />
+            ))}
+          </View>
+        )}
+      </View>
       {width > 0 && (
         <Animated.View 
           style={[
@@ -145,16 +155,18 @@ const styles = StyleSheet.create({
     position: 'relative',
   },
   trackBackground: {
-    height: 6,
-    backgroundColor: '#4B5563',
-    borderRadius: 3,
+    height: 40,
+    backgroundColor: '#1F2937',
+    borderRadius: 8,
     width: '100%',
     position: 'absolute',
+    overflow: 'hidden',
   },
   trackActive: {
-    height: 6,
-    borderRadius: 3,
+    height: 40,
+    borderRadius: 8,
     position: 'absolute',
+    opacity: 0.5,
   },
   thumb: {
     width: 24,
