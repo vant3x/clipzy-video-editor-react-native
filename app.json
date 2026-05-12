@@ -7,7 +7,7 @@
     "icon": "./assets/images/icon.png",
     "scheme": "videoeditor",
     "userInterfaceStyle": "automatic",
-    "newArchEnabled": false,
+    "newArchEnabled": true,
     "ios": {
       "bundleIdentifier": "com.alejo.videoeditor",
       "supportsTablet": true
