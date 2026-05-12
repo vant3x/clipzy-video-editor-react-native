@@ -1,4 +1,4 @@
-import { FFmpegKit, FFprobeKit, ReturnCode } from 'ffmpeg-kit-react-native';
+import { FFmpegKit, FFprobeKit, ReturnCode } from '@wekor/react-native-ffmpeg';
 import { Paths } from 'expo-file-system';
 import * as FileSystem from 'expo-file-system';
 
