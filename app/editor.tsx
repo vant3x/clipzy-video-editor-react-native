@@ -29,6 +29,7 @@ interface ClipData {
   width: number;
   height: number;
   thumbnails: string[];
+  hasAudio: boolean;
 }
 
 export default function EditorScreen() {
@@ -94,7 +95,7 @@ export default function EditorScreen() {
       if (urisParam) {
         try { initialUris = JSON.parse(urisParam) as string[]; } catch (e) {}
       }
-      setClipsData(initialUris.map(u => ({ uri: u, trimStart: 0, trimEnd: 0, duration: 0, width: 0, height: 0, thumbnails: [] })));
+      setClipsData(initialUris.map(u => ({ uri: u, trimStart: 0, trimEnd: 0, duration: 0, width: 0, height: 0, thumbnails: [], hasAudio: true })));
       setIsProjectLoading(false);
     }
   }, [projectId, urisParam]);
@@ -120,28 +121,41 @@ export default function EditorScreen() {
     return () => clearTimeout(timeout);
   }, [clipsData, speed, brightness, contrast, saturation, aspectRatio, musicUri, musicName, currentProjectId, projectName, isProjectLoading]);
 
-  // Load metadata + thumbnails for the active clip
+  // Preload metadata for all clips that don't have it yet
   useEffect(() => {
-    if (!uri) return;
-    // Clear thumbnails while loading
-    setClipsData(prev => prev.map((c, i) =>
-      i === activeClipIndex ? { ...c, thumbnails: [] } : c
-    ));
-    getVideoMetadata(uri).then(metadata => {
-      if (metadata?.duration) {
-        setClipsData(prev => prev.map((c, i) =>
-          i === activeClipIndex
-            ? { ...c, trimStart: 0, trimEnd: metadata.duration, duration: metadata.duration, width: metadata.width, height: metadata.height }
-            : c
-        ));
-        generateThumbnails(uri, metadata.duration, 8).then(thumbs => {
-          setClipsData(prev => prev.map((c, i) =>
-            i === activeClipIndex ? { ...c, thumbnails: thumbs } : c
-          ));
+    clipsData.forEach((clip, index) => {
+      if (clip.duration === 0) {
+        getVideoMetadata(clip.uri).then(metadata => {
+          if (metadata) {
+            setClipsData(prev => {
+              const next = [...prev];
+              if (next[index] && next[index].duration === 0) {
+                next[index] = { 
+                  ...next[index], 
+                  duration: metadata.duration, 
+                  trimEnd: metadata.duration, 
+                  width: metadata.width, 
+                  height: metadata.height, 
+                  hasAudio: metadata.hasAudio 
+                };
+              }
+              return next;
+            });
+          }
         });
       }
     });
-  }, [uri]);
+  }, [clipsData]);
+
+  // Load thumbnails ONLY for the active clip
+  useEffect(() => {
+    if (!activeClip || activeClip.duration === 0 || activeClip.thumbnails.length > 0) return;
+    generateThumbnails(activeClip.uri, activeClip.duration, 8).then(thumbs => {
+      setClipsData(prev => prev.map((c, i) =>
+        i === activeClipIndex ? { ...c, thumbnails: thumbs } : c
+      ));
+    });
+  }, [activeClipIndex, activeClip?.duration, activeClip?.thumbnails.length, activeClip?.uri]);
 
   // Loop playback within trimmed range of active clip
   useEffect(() => {
@@ -196,7 +210,7 @@ export default function EditorScreen() {
     });
     if (!result.canceled && result.assets) {
       const newClips: ClipData[] = result.assets.map(a => ({
-        uri: a.uri, trimStart: 0, trimEnd: 0, duration: 0, width: 0, height: 0, thumbnails: []
+        uri: a.uri, trimStart: 0, trimEnd: 0, duration: 0, width: 0, height: 0, thumbnails: [], hasAudio: true
       }));
       setClipsData(prev => [...prev, ...newClips]);
     }
@@ -217,6 +231,7 @@ export default function EditorScreen() {
       // Build per-clip inputs with individual trims
       const clipInputs: ClipInput[] = clipsData.map(c => ({
         uri: c.uri,
+        hasAudio: c.hasAudio,
         ...(c.duration > 0 && (c.trimStart > 0 || c.trimEnd < c.duration)
           ? { trim: { start: c.trimStart, end: c.trimEnd } }
           : {}),

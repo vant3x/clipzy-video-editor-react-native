@@ -6,12 +6,15 @@ export interface VideoMetadata {
   duration: number;
   width: number;
   height: number;
+  hasAudio: boolean;
+  hasVideo: boolean;
 }
 
 /** Represents a single input clip with optional per-clip trim */
 export interface ClipInput {
   uri: string;
   trim?: { start: number; end: number };
+  hasAudio?: boolean;
 }
 
 export interface EditOptions {
@@ -39,15 +42,19 @@ export const getVideoMetadata = async (uri: string): Promise<VideoMetadata | nul
       const duration = Number(info.getDuration());
       const streams = info.getStreams();
       let width = 0, height = 0;
+      let hasAudio = false;
+      let hasVideo = false;
       for (let i = 0; i < streams.length; i++) {
         const stream = streams[i];
         if (stream.getType() === 'video') {
+          hasVideo = true;
           width = stream.getWidth();
           height = stream.getHeight();
-          break;
+        } else if (stream.getType() === 'audio') {
+          hasAudio = true;
         }
       }
-      return { duration, width, height };
+      return { duration, width, height, hasAudio, hasVideo };
     }
   } catch (error) {
     console.error('Error getting video metadata:', error);
@@ -198,9 +205,12 @@ export const processVideo = async (
       // Video: scale + pad to 1080x1920 (portrait default), preserve AR
       scaleFilters += `[${i}:v]scale=1080:1920:force_original_aspect_ratio=decrease,` +
         `pad=1080:1920:(ow-iw)/2:(oh-ih)/2,setsar=1[sv${i}];`;
-      // Audio: anull passes audio through; if no audio stream this will fail,
-      // so we use the optional specifier workaround below via a separate graph node.
-      scaleFilters += `[${i}:a]anull[sa${i}];`;
+      // Audio: generate silent track if clip lacks audio, otherwise concat fails
+      if (clips[i].hasAudio === false) {
+        scaleFilters += `anullsrc=channel_layout=stereo:sample_rate=44100[sa${i}];`;
+      } else {
+        scaleFilters += `[${i}:a]anull[sa${i}];`;
+      }
       concatParts += `[sv${i}][sa${i}]`;
     }
 
@@ -228,6 +238,13 @@ export const processVideo = async (
     let filterParts = '';
     let vMapSrc = '0:v';
     let aMapSrc = '0:a';
+    
+    const hasAudio = clips[0].hasAudio !== false;
+
+    if (!hasAudio && (audioFilters.length > 0 || options.musicUri)) {
+      filterParts += `anullsrc=channel_layout=stereo:sample_rate=44100[silence];`;
+      aMapSrc = '[silence]';
+    }
 
     if (videoFilters.length > 0) {
       filterParts += `[0:v]${videoFilters.join(',')}[vout];`;
@@ -235,27 +252,37 @@ export const processVideo = async (
     }
 
     if (options.musicUri) {
-      if (audioFilters.length > 0) {
-        filterParts += `[0:a]${audioFilters.join(',')}[avid];`;
+      if (audioFilters.length > 0 && hasAudio) {
+        filterParts += `[${aMapSrc}]${audioFilters.join(',')}[avid];`;
         filterParts += `[avid][${musicIndex}:a]amix=inputs=2:duration=first:dropout_transition=2[aout]`;
       } else {
-        filterParts += `[0:a][${musicIndex}:a]amix=inputs=2:duration=first:dropout_transition=2[aout]`;
+        filterParts += `[${aMapSrc}][${musicIndex}:a]amix=inputs=2:duration=first:dropout_transition=2[aout]`;
       }
       aMapSrc = '[aout]';
-    } else if (audioFilters.length > 0) {
-      filterParts += `[0:a]${audioFilters.join(',')}[aout]`;
+    } else if (audioFilters.length > 0 && hasAudio) {
+      filterParts += `[${aMapSrc}]${audioFilters.join(',')}[aout]`;
       aMapSrc = '[aout]';
     }
 
     if (filterParts) {
+      if (filterParts.endsWith(';')) filterParts = filterParts.slice(0, -1);
       filterComplex = `-filter_complex "${filterParts}"`;
     }
-    mapArgs = `-map ${vMapSrc} -map ${aMapSrc}`;
+    
+    if (!hasAudio && !options.musicUri && audioFilters.length === 0) {
+      mapArgs = `-map ${vMapSrc}`;
+    } else {
+      mapArgs = `-map ${vMapSrc} -map ${aMapSrc}`;
+    }
 
   } else {
     // ── Single clip, no filters, no music ───────────────────────────────────
     // Just re-encode (trim already applied as input options above)
-    mapArgs = `-map 0:v -map 0:a?`;
+    if (clips[0].hasAudio === false) {
+      mapArgs = `-map 0:v`;
+    } else {
+      mapArgs = `-map 0:v -map 0:a?`;
+    }
   }
 
   // Output codec options
