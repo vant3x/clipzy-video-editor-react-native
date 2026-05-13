@@ -1,6 +1,7 @@
 import { useState, useRef, useEffect, useMemo } from 'react';
 import { StyleSheet, View, TouchableOpacity, ScrollView, Text, ActivityIndicator, Alert, Modal } from 'react-native';
 import { useLocalSearchParams, router } from 'expo-router';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { ThemedText } from '@/components/themed-text';
 import { ThemedView } from '@/components/themed-view';
 import { Ionicons } from '@expo/vector-icons';
@@ -13,32 +14,47 @@ import * as MediaLibrary from 'expo-media-library';
 import * as DocumentPicker from 'expo-document-picker';
 import * as ImagePicker from 'expo-image-picker';
 import DraggableFlatList, { ScaleDecorator } from 'react-native-draggable-flatlist';
-import { processVideo, getVideoMetadata, generateThumbnails } from '@/utils/ffmpeg';
+import { processVideo, getVideoMetadata, generateThumbnails, ClipInput } from '@/utils/ffmpeg';
 import { RangeSlider } from '@/components/ui/RangeSlider';
 import { TransformCanvas, TransformState } from '@/components/ui/TransformCanvas';
 
 type Tool = 'trim' | 'speed' | 'color' | 'format' | 'music' | null;
 
+interface ClipData {
+  uri: string;
+  trimStart: number;
+  trimEnd: number;
+  duration: number;
+  width: number;
+  height: number;
+  thumbnails: string[];
+}
+
 export default function EditorScreen() {
   const { uri: singleUri, uris: urisParam } = useLocalSearchParams<{ uri?: string, uris?: string }>();
   const colorScheme = useColorScheme();
   const isDark = colorScheme === 'dark';
-  
-  const initialClips = useMemo(() => {
+  const insets = useSafeAreaInsets();
+
+  const initialUris = useMemo(() => {
     if (urisParam) {
-      try { return JSON.parse(urisParam); } catch (e) {}
+      try { return JSON.parse(urisParam) as string[]; } catch (e) {}
     }
     if (singleUri) return [singleUri];
     return [];
   }, [urisParam, singleUri]);
 
-  const [clips, setClips] = useState<string[]>(initialClips);
+  const [clipsData, setClipsData] = useState<ClipData[]>(
+    initialUris.map(u => ({ uri: u, trimStart: 0, trimEnd: 0, duration: 0, width: 0, height: 0, thumbnails: [] }))
+  );
   const [activeClipIndex, setActiveClipIndex] = useState(0);
-  const uri = clips[activeClipIndex] || null;
-  
-  const player = useVideoPlayer(uri, player => {
-    player.loop = true;
-    player.play();
+
+  const activeClip = clipsData[activeClipIndex];
+  const uri = activeClip?.uri ?? null;
+
+  const player = useVideoPlayer(uri, p => {
+    p.loop = true;
+    p.play();
   });
 
   const [isPlaying, setIsPlaying] = useState(true);
@@ -46,17 +62,11 @@ export default function EditorScreen() {
   const [isExporting, setIsExporting] = useState(false);
   const [showExportModal, setShowExportModal] = useState(false);
 
-  // Edit states
+  // Global edit states (applied to all clips on export)
   const [speed, setSpeed] = useState<number>(1.0);
   const [brightness, setBrightness] = useState<number>(0);
   const [contrast, setContrast] = useState<number>(1.0);
   const [saturation, setSaturation] = useState<number>(1.0);
-  const [trimStart, setTrimStart] = useState<number>(0);
-  const [trimEnd, setTrimEnd] = useState<number>(0);
-  const [videoDuration, setVideoDuration] = useState<number>(0);
-  const [videoWidth, setVideoWidth] = useState<number>(0);
-  const [videoHeight, setVideoHeight] = useState<number>(0);
-  const [thumbnails, setThumbnails] = useState<string[]>([]);
 
   // Music state
   const [musicUri, setMusicUri] = useState<string | null>(null);
@@ -67,40 +77,46 @@ export default function EditorScreen() {
   const [transform, setTransform] = useState<TransformState>({ scale: 1, translateX: 0, translateY: 0, rotation: 0 });
   const [resetTrigger, setResetTrigger] = useState<number>(0);
 
+  // Load metadata + thumbnails for the active clip
   useEffect(() => {
-    if (uri) {
-      setThumbnails([]); // clear prev thumbs
-      getVideoMetadata(uri).then(metadata => {
-        if (metadata && metadata.duration) {
-          setVideoDuration(metadata.duration);
-          setTrimEnd(metadata.duration);
-          setVideoWidth(metadata.width);
-          setVideoHeight(metadata.height);
-          
-          generateThumbnails(uri, metadata.duration, 8).then(thumbs => {
-             setThumbnails(thumbs);
-          });
-        }
-      });
-    }
+    if (!uri) return;
+    // Clear thumbnails while loading
+    setClipsData(prev => prev.map((c, i) =>
+      i === activeClipIndex ? { ...c, thumbnails: [] } : c
+    ));
+    getVideoMetadata(uri).then(metadata => {
+      if (metadata?.duration) {
+        setClipsData(prev => prev.map((c, i) =>
+          i === activeClipIndex
+            ? { ...c, trimStart: 0, trimEnd: metadata.duration, duration: metadata.duration, width: metadata.width, height: metadata.height }
+            : c
+        ));
+        generateThumbnails(uri, metadata.duration, 8).then(thumbs => {
+          setClipsData(prev => prev.map((c, i) =>
+            i === activeClipIndex ? { ...c, thumbnails: thumbs } : c
+          ));
+        });
+      }
+    });
   }, [uri]);
 
-  // Loop playback within trimmed range
+  // Loop playback within trimmed range of active clip
   useEffect(() => {
+    if (!activeClip) return;
     let interval: NodeJS.Timeout;
-    if (isPlaying && activeTool === 'trim' && videoDuration > 0) {
+    if (isPlaying && activeTool === 'trim' && activeClip.duration > 0) {
       interval = setInterval(() => {
         if (player) {
-          if (player.currentTime >= trimEnd) {
-            player.currentTime = trimStart;
-          } else if (player.currentTime < trimStart) {
-            player.currentTime = trimStart;
+          if (player.currentTime >= activeClip.trimEnd) {
+            player.currentTime = activeClip.trimStart;
+          } else if (player.currentTime < activeClip.trimStart) {
+            player.currentTime = activeClip.trimStart;
           }
         }
       }, 100);
     }
     return () => clearInterval(interval);
-  }, [isPlaying, activeTool, trimStart, trimEnd, player, videoDuration]);
+  }, [isPlaying, activeTool, activeClip?.trimStart, activeClip?.trimEnd, player, activeClip?.duration]);
   
   // Export states
   const [exportResolution, setExportResolution] = useState<string>('Original'); // 'Original', '1280x720', '1920x1080', '3840x2160'
@@ -136,62 +152,54 @@ export default function EditorScreen() {
       quality: 1,
     });
     if (!result.canceled && result.assets) {
-      const newUris = result.assets.map(a => a.uri);
-      setClips(prev => [...prev, ...newUris]);
+      const newClips: ClipData[] = result.assets.map(a => ({
+        uri: a.uri, trimStart: 0, trimEnd: 0, duration: 0, width: 0, height: 0, thumbnails: []
+      }));
+      setClipsData(prev => [...prev, ...newClips]);
     }
   };
 
   const executeExport = async () => {
-    if (clips.length === 0) return;
-
+    if (clipsData.length === 0) return;
     setShowExportModal(false);
-
-    // Request permissions
     const { status } = await MediaLibrary.requestPermissionsAsync();
     if (status !== 'granted') {
       Alert.alert('Permission needed', 'We need permission to save videos to your gallery.');
       return;
     }
-
     try {
       setIsExporting(true);
-      
       const outputUri = `${Paths.cache.uri}output_${Date.now()}.mp4`;
-      
+
+      // Build per-clip inputs with individual trims
+      const clipInputs: ClipInput[] = clipsData.map(c => ({
+        uri: c.uri,
+        ...(c.duration > 0 && (c.trimStart > 0 || c.trimEnd < c.duration)
+          ? { trim: { start: c.trimStart, end: c.trimEnd } }
+          : {}),
+      }));
+
       const options: any = {
-        speed: speed,
+        speed,
         color: { brightness, contrast, saturation },
         transform: {
           scale: transform.scale,
           translateX: transform.translateX,
           translateY: transform.translateY,
           rotation: transform.rotation,
-          targetRatio: aspectRatio
-        }
+          targetRatio: aspectRatio,
+        },
       };
+      if (musicUri) options.musicUri = musicUri;
+      if (exportResolution !== 'Original') options.resolution = exportResolution;
+      if (exportFps !== 'Original') options.fps = parseInt(exportFps, 10);
 
-      if (musicUri) {
-        options.musicUri = musicUri;
-      }
-
-      if (trimStart > 0 || trimEnd < videoDuration) {
-        options.trim = { start: trimStart, end: trimEnd };
-      }
-
-      if (exportResolution !== 'Original') {
-        options.resolution = exportResolution;
-      }
-      if (exportFps !== 'Original') {
-        options.fps = parseInt(exportFps, 10);
-      }
-
-      const success = await processVideo(clips, outputUri, options);
-
+      const success = await processVideo(clipInputs, outputUri, options);
       if (success) {
         await MediaLibrary.saveToLibraryAsync(outputUri);
-        Alert.alert('Success', 'Video exported to gallery successfully!');
+        Alert.alert('✅ Exported', 'Video saved to your gallery!');
       } else {
-        Alert.alert('Error', 'Failed to process video.');
+        Alert.alert('Export Failed', 'FFmpeg could not process the video. Check that all clips have video streams.');
       }
     } catch (error) {
       console.error(error);
@@ -266,39 +274,36 @@ export default function EditorScreen() {
     }
 
     if (activeTool === 'trim') {
-      const formatTime = (seconds: number) => {
-        const m = Math.floor(seconds / 60);
-        const s = Math.floor(seconds % 60);
-        return `${m}:${s < 10 ? '0' : ''}${s}`;
-      };
-
+      const fmt = (s: number) => `${Math.floor(s/60)}:${String(Math.floor(s%60)).padStart(2,'0')}`;
       return (
         <View style={styles.toolOptionsContainer}>
-          <ThemedText style={styles.toolTitle}>Trim Video</ThemedText>
-          {videoDuration > 0 ? (
+          <ThemedText style={styles.toolTitle}>Trim — Clip {activeClipIndex + 1}</ThemedText>
+          {activeClip && activeClip.duration > 0 ? (
             <View style={{ width: '100%', paddingHorizontal: 10 }}>
-              <View style={{ flexDirection: 'row', justifyContent: 'space-between', marginBottom: 10 }}>
-                <ThemedText style={styles.sliderLabel}>Start: {formatTime(trimStart)}</ThemedText>
-                <ThemedText style={styles.sliderLabel}>End: {formatTime(trimEnd)}</ThemedText>
+              <View style={{ flexDirection: 'row', justifyContent: 'space-between', marginBottom: 8 }}>
+                <ThemedText style={styles.sliderLabel}>Start: {fmt(activeClip.trimStart)}</ThemedText>
+                <ThemedText style={styles.sliderLabel}>End: {fmt(activeClip.trimEnd)}</ThemedText>
               </View>
-              <RangeSlider 
-                min={0} 
-                max={videoDuration} 
-                initialLow={trimStart} 
-                initialHigh={trimEnd} 
+              {/* key forces remount when switching clips so refs reinitialize */}
+              <RangeSlider
+                key={`rs-${activeClipIndex}`}
+                min={0}
+                max={activeClip.duration}
+                initialLow={activeClip.trimStart}
+                initialHigh={activeClip.trimEnd}
                 onValueChanged={(low, high) => {
-                  setTrimStart(low);
-                  setTrimEnd(high);
-                  if (player) {
-                    player.currentTime = low;
-                  }
+                  setClipsData(prev => prev.map((c, i) =>
+                    i === activeClipIndex ? { ...c, trimStart: low, trimEnd: high } : c
+                  ));
+                  if (player) player.currentTime = low;
                 }}
                 onValuesChanging={(low, high) => {
-                  setTrimStart(low);
-                  setTrimEnd(high);
+                  setClipsData(prev => prev.map((c, i) =>
+                    i === activeClipIndex ? { ...c, trimStart: low, trimEnd: high } : c
+                  ));
                 }}
                 activeColor={activeColor}
-                thumbnails={thumbnails}
+                thumbnails={activeClip.thumbnails}
               />
             </View>
           ) : (
@@ -387,7 +392,7 @@ export default function EditorScreen() {
 
   return (
     <ThemedView style={styles.container}>
-      <View style={styles.header}>
+      <View style={[styles.header, { paddingTop: insets.top + 8 }]}>
         <TouchableOpacity onPress={() => router.back()} style={styles.iconButton} disabled={isExporting}>
           <Ionicons name="chevron-back" size={28} color={isDark ? Colors.dark.text : Colors.light.text} />
         </TouchableOpacity>
@@ -406,37 +411,39 @@ export default function EditorScreen() {
         </View>
       </View>
 
-      {clips.length > 1 && (
-        <View style={{ paddingHorizontal: 16, paddingBottom: 10 }}>
+      {clipsData.length > 1 && (
+        <View style={{ paddingHorizontal: 16, paddingBottom: 8 }}>
           <DraggableFlatList
             horizontal
-            data={clips}
+            data={clipsData}
             onDragEnd={({ data }) => {
-               const currentActiveUri = clips[activeClipIndex];
-               setClips(data);
-               const newIndex = data.indexOf(currentActiveUri);
-               if (newIndex !== -1) setActiveClipIndex(newIndex);
+              const currentUri = clipsData[activeClipIndex]?.uri;
+              setClipsData(data);
+              const newIndex = data.findIndex(c => c.uri === currentUri);
+              if (newIndex !== -1) setActiveClipIndex(newIndex);
             }}
-            keyExtractor={(item, index) => `${item}_${index}`}
+            keyExtractor={(item, index) => `${item.uri}_${index}`}
             contentContainerStyle={{ gap: 8 }}
             renderItem={({ item, drag, isActive, getIndex }) => {
-               const i = getIndex() || 0;
-               return (
-                 <ScaleDecorator>
-                   <TouchableOpacity 
-                     onLongPress={drag}
-                     onPress={() => setActiveClipIndex(i)} 
-                     style={{ 
-                       paddingVertical: 6, paddingHorizontal: 12, 
-                       backgroundColor: isActive ? '#555' : (i === activeClipIndex ? activeColor : '#333'),
-                       borderRadius: 12,
-                       elevation: isActive ? 5 : 0
-                     }}
-                   >
-                      <Text style={{ color: '#fff', fontSize: 12, fontWeight: 'bold' }}>Clip {i + 1}</Text>
-                   </TouchableOpacity>
-                 </ScaleDecorator>
-               );
+              const i = getIndex() ?? 0;
+              return (
+                <ScaleDecorator>
+                  <TouchableOpacity
+                    onLongPress={drag}
+                    onPress={() => setActiveClipIndex(i)}
+                    style={{
+                      paddingVertical: 6, paddingHorizontal: 14,
+                      backgroundColor: isActive ? '#555' : (i === activeClipIndex ? activeColor : '#2D3748'),
+                      borderRadius: 12,
+                      elevation: isActive ? 5 : 0,
+                      borderWidth: i === activeClipIndex ? 0 : 1,
+                      borderColor: '#4B5563',
+                    }}
+                  >
+                    <Text style={{ color: '#fff', fontSize: 12, fontWeight: '700' }}>Clip {i + 1}</Text>
+                  </TouchableOpacity>
+                </ScaleDecorator>
+              );
             }}
           />
         </View>
@@ -447,8 +454,8 @@ export default function EditorScreen() {
           <TransformCanvas 
             player={player}
             aspectRatio={aspectRatio}
-            videoWidth={videoWidth}
-            videoHeight={videoHeight}
+            videoWidth={activeClip?.width ?? 0}
+            videoHeight={activeClip?.height ?? 0}
             onTransformChange={setTransform}
             resetTrigger={resetTrigger}
           />
@@ -464,7 +471,7 @@ export default function EditorScreen() {
         {renderToolOptions()}
       </View>
 
-      <View style={styles.toolbarContainer}>
+      <View style={[styles.toolbarContainer, { paddingBottom: Math.max(insets.bottom, 16) }]}>
         <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.toolbar}>
           <ToolbarButton 
             icon="cut-outline" 
@@ -576,7 +583,6 @@ function ToolbarButton({ icon, label, isActive, onPress, activeColor, isDark }: 
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    paddingTop: 50,
   },
   header: {
     flexDirection: 'row',
@@ -608,9 +614,10 @@ const styles = StyleSheet.create({
     gap: 12,
   },
   toolArea: {
-    height: 140,
+    minHeight: 140,
     justifyContent: 'center',
-    paddingHorizontal: 20,
+    paddingHorizontal: 16,
+    paddingVertical: 8,
   },
   controlsContainer: {
     alignItems: 'center',
@@ -661,8 +668,8 @@ const styles = StyleSheet.create({
     marginTop: 8,
   },
   toolbarContainer: {
-    paddingVertical: 16,
-    paddingBottom: 32,
+    paddingTop: 12,
+    paddingBottom: 16,
     borderTopWidth: 1,
     borderTopColor: '#272A30',
   },

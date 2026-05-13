@@ -13,67 +13,81 @@ interface RangeSliderProps {
   thumbnails?: string[];
 }
 
-  export function RangeSlider({ 
-    min, 
-    max, 
-    initialLow, 
-    initialHigh, 
-    onValueChanged, 
-    onValuesChanging,
-    activeColor = '#3B82F6',
-    thumbColor = '#FFFFFF',
-    thumbnails = []
-  }: RangeSliderProps) {
+export function RangeSlider({
+  min,
+  max,
+  initialLow,
+  initialHigh,
+  onValueChanged,
+  onValuesChanging,
+  activeColor = '#3B82F6',
+  thumbColor = '#FFFFFF',
+  thumbnails = []
+}: RangeSliderProps) {
   const [width, setWidth] = useState(0);
-  const THUMB_SIZE = 24;
+  const THUMB_SIZE = 28;
 
+  // Current logical values
   const lowRef = useRef(initialLow ?? min);
   const highRef = useRef(initialHigh ?? max);
 
+  // Animated positions
   const panLow = useRef(new Animated.Value(0)).current;
   const panHigh = useRef(new Animated.Value(0)).current;
 
+  // Positions captured at gesture start (fix for dx-accumulation bug)
+  const lowStartPos = useRef(0);
+  const highStartPos = useRef(0);
+
+  const toPos = (value: number, w: number) =>
+    ((value - min) / (max - min)) * (w - THUMB_SIZE);
+
+  const toValue = (pos: number, w: number) =>
+    min + (pos / (w - THUMB_SIZE)) * (max - min);
+
+  // Initialize / re-initialize when layout or range changes
   useEffect(() => {
     if (width > 0) {
-      const lowPos = ((lowRef.current - min) / (max - min)) * (width - THUMB_SIZE);
-      const highPos = ((highRef.current - min) / (max - min)) * (width - THUMB_SIZE);
-      panLow.setValue(lowPos);
-      panHigh.setValue(highPos);
+      const lp = toPos(lowRef.current, width);
+      const hp = toPos(highRef.current, width);
+      panLow.setValue(lp);
+      panHigh.setValue(hp);
     }
   }, [width, min, max]);
 
-  const updateValues = (newLowPos: number, newHighPos: number, isRelease: boolean) => {
-    if (width === 0) return;
-    const range = max - min;
-    const lowVal = min + (newLowPos / (width - THUMB_SIZE)) * range;
-    const highVal = min + (newHighPos / (width - THUMB_SIZE)) * range;
-    
-    lowRef.current = Math.max(min, Math.min(lowVal, highRef.current - 0.1));
-    highRef.current = Math.min(max, Math.max(highVal, lowRef.current + 0.1));
+  const clampLow = (pos: number) =>
+    Math.max(0, Math.min(pos, toPos(highRef.current, width) - THUMB_SIZE));
 
+  const clampHigh = (pos: number) =>
+    Math.max(toPos(lowRef.current, width) + THUMB_SIZE, Math.min(pos, width - THUMB_SIZE));
+
+  const commitValues = (lowPos: number, highPos: number, isRelease: boolean) => {
+    if (width === 0) return;
+    lowRef.current = Math.max(min, Math.min(toValue(lowPos, width), max));
+    highRef.current = Math.max(min, Math.min(toValue(highPos, width), max));
     if (isRelease) {
       onValueChanged(lowRef.current, highRef.current);
-    } else if (onValuesChanging) {
-      onValuesChanging(lowRef.current, highRef.current);
+    } else {
+      onValuesChanging?.(lowRef.current, highRef.current);
     }
   };
 
   const lowPanResponder = useRef(
     PanResponder.create({
       onStartShouldSetPanResponder: () => true,
-      onPanResponderMove: (_, gestureState) => {
-        let newPos = ((lowRef.current - min) / (max - min)) * (width - THUMB_SIZE) + gestureState.dx;
-        const maxPos = ((highRef.current - min) / (max - min)) * (width - THUMB_SIZE) - THUMB_SIZE;
-        newPos = Math.max(0, Math.min(newPos, maxPos));
-        panLow.setValue(newPos);
-        updateValues(newPos, ((highRef.current - min) / (max - min)) * (width - THUMB_SIZE), false);
+      onPanResponderGrant: () => {
+        // Capture starting position ONCE when finger touches thumb
+        lowStartPos.current = toPos(lowRef.current, width);
       },
-      onPanResponderRelease: (_, gestureState) => {
-        let newPos = ((lowRef.current - min) / (max - min)) * (width - THUMB_SIZE) + gestureState.dx;
-        const maxPos = ((highRef.current - min) / (max - min)) * (width - THUMB_SIZE) - THUMB_SIZE;
-        newPos = Math.max(0, Math.min(newPos, maxPos));
+      onPanResponderMove: (_, gs) => {
+        const newPos = clampLow(lowStartPos.current + gs.dx);
         panLow.setValue(newPos);
-        updateValues(newPos, ((highRef.current - min) / (max - min)) * (width - THUMB_SIZE), true);
+        commitValues(newPos, toPos(highRef.current, width), false);
+      },
+      onPanResponderRelease: (_, gs) => {
+        const newPos = clampLow(lowStartPos.current + gs.dx);
+        panLow.setValue(newPos);
+        commitValues(newPos, toPos(highRef.current, width), true);
       },
     })
   ).current;
@@ -81,56 +95,65 @@ interface RangeSliderProps {
   const highPanResponder = useRef(
     PanResponder.create({
       onStartShouldSetPanResponder: () => true,
-      onPanResponderMove: (_, gestureState) => {
-        let newPos = ((highRef.current - min) / (max - min)) * (width - THUMB_SIZE) + gestureState.dx;
-        const minPos = ((lowRef.current - min) / (max - min)) * (width - THUMB_SIZE) + THUMB_SIZE;
-        newPos = Math.max(minPos, Math.min(newPos, width - THUMB_SIZE));
-        panHigh.setValue(newPos);
-        updateValues(((lowRef.current - min) / (max - min)) * (width - THUMB_SIZE), newPos, false);
+      onPanResponderGrant: () => {
+        highStartPos.current = toPos(highRef.current, width);
       },
-      onPanResponderRelease: (_, gestureState) => {
-        let newPos = ((highRef.current - min) / (max - min)) * (width - THUMB_SIZE) + gestureState.dx;
-        const minPos = ((lowRef.current - min) / (max - min)) * (width - THUMB_SIZE) + THUMB_SIZE;
-        newPos = Math.max(minPos, Math.min(newPos, width - THUMB_SIZE));
+      onPanResponderMove: (_, gs) => {
+        const newPos = clampHigh(highStartPos.current + gs.dx);
         panHigh.setValue(newPos);
-        updateValues(((lowRef.current - min) / (max - min)) * (width - THUMB_SIZE), newPos, true);
+        commitValues(toPos(lowRef.current, width), newPos, false);
+      },
+      onPanResponderRelease: (_, gs) => {
+        const newPos = clampHigh(highStartPos.current + gs.dx);
+        panHigh.setValue(newPos);
+        commitValues(toPos(lowRef.current, width), newPos, true);
       },
     })
   ).current;
 
   return (
-    <View 
-      style={styles.container} 
+    <View
+      style={styles.container}
       onLayout={(e: LayoutChangeEvent) => setWidth(e.nativeEvent.layout.width)}
     >
+      {/* Thumbnail strip background */}
       <View style={styles.trackBackground}>
-        {thumbnails.length > 0 && (
-          <View style={{ flexDirection: 'row', width: '100%', height: '100%', overflow: 'hidden', borderRadius: 3 }}>
+        {thumbnails.length > 0 ? (
+          <View style={{ flexDirection: 'row', width: '100%', height: '100%', overflow: 'hidden' }}>
             {thumbnails.map((uri, index) => (
-              <Image key={index} source={{ uri }} style={{ flex: 1, height: '100%', resizeMode: 'cover' }} />
+              <Image
+                key={index}
+                source={{ uri }}
+                style={{ flex: 1, height: '100%', resizeMode: 'cover' }}
+              />
             ))}
           </View>
-        )}
+        ) : null}
       </View>
+
+      {/* Active range overlay */}
       {width > 0 && (
-        <Animated.View 
+        <Animated.View
           style={[
-            styles.trackActive, 
-            { 
+            styles.trackActive,
+            {
               backgroundColor: activeColor,
               left: panLow.interpolate({
-                inputRange: [0, width],
-                outputRange: [THUMB_SIZE / 2, width + THUMB_SIZE / 2]
+                inputRange: [0, width - THUMB_SIZE],
+                outputRange: [THUMB_SIZE / 2, width - THUMB_SIZE / 2],
+                extrapolate: 'clamp',
               }),
               right: panHigh.interpolate({
-                inputRange: [0, width],
-                outputRange: [width - THUMB_SIZE / 2, -THUMB_SIZE / 2]
-              })
-            }
-          ]} 
+                inputRange: [0, width - THUMB_SIZE],
+                outputRange: [width - THUMB_SIZE / 2, THUMB_SIZE / 2],
+                extrapolate: 'clamp',
+              }),
+            },
+          ]}
         />
       )}
-      
+
+      {/* Thumbs */}
       {width > 0 && (
         <>
           <Animated.View
@@ -149,13 +172,13 @@ interface RangeSliderProps {
 
 const styles = StyleSheet.create({
   container: {
-    height: 40,
+    height: 48,
     justifyContent: 'center',
     width: '100%',
     position: 'relative',
   },
   trackBackground: {
-    height: 40,
+    height: 48,
     backgroundColor: '#1F2937',
     borderRadius: 8,
     width: '100%',
@@ -163,22 +186,22 @@ const styles = StyleSheet.create({
     overflow: 'hidden',
   },
   trackActive: {
-    height: 40,
+    height: 48,
     borderRadius: 8,
     position: 'absolute',
-    opacity: 0.5,
+    opacity: 0.45,
   },
   thumb: {
-    width: 24,
-    height: 24,
-    borderRadius: 12,
+    width: 28,
+    height: 48,
+    borderRadius: 6,
     position: 'absolute',
     shadowColor: '#000',
     shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.3,
-    shadowRadius: 3,
-    elevation: 4,
-    borderWidth: 2,
+    shadowOpacity: 0.4,
+    shadowRadius: 4,
+    elevation: 5,
+    borderWidth: 2.5,
     borderColor: '#E5E7EB',
   },
 });
