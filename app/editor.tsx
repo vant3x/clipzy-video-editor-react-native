@@ -17,6 +17,7 @@ import DraggableFlatList, { ScaleDecorator } from 'react-native-draggable-flatli
 import { processVideo, getVideoMetadata, generateThumbnails, ClipInput } from '@/utils/ffmpeg';
 import { RangeSlider } from '@/components/ui/RangeSlider';
 import { TransformCanvas, TransformState } from '@/components/ui/TransformCanvas';
+import { saveProject, getProject, Project } from '@/utils/storage';
 
 type Tool = 'trim' | 'speed' | 'color' | 'format' | 'music' | null;
 
@@ -31,23 +32,17 @@ interface ClipData {
 }
 
 export default function EditorScreen() {
-  const { uri: singleUri, uris: urisParam } = useLocalSearchParams<{ uri?: string, uris?: string }>();
+  const { projectId, uris: urisParam } = useLocalSearchParams<{ projectId?: string, uris?: string }>();
   const colorScheme = useColorScheme();
   const isDark = colorScheme === 'dark';
   const insets = useSafeAreaInsets();
 
-  const initialUris = useMemo(() => {
-    if (urisParam) {
-      try { return JSON.parse(urisParam) as string[]; } catch (e) {}
-    }
-    if (singleUri) return [singleUri];
-    return [];
-  }, [urisParam, singleUri]);
+  const [currentProjectId, setCurrentProjectId] = useState<string>(projectId || `proj_${Date.now()}`);
+  const [projectName, setProjectName] = useState<string>('My Project');
 
-  const [clipsData, setClipsData] = useState<ClipData[]>(
-    initialUris.map(u => ({ uri: u, trimStart: 0, trimEnd: 0, duration: 0, width: 0, height: 0, thumbnails: [] }))
-  );
+  const [clipsData, setClipsData] = useState<ClipData[]>([]);
   const [activeClipIndex, setActiveClipIndex] = useState(0);
+  const [isProjectLoading, setIsProjectLoading] = useState(!!projectId);
 
   const activeClip = clipsData[activeClipIndex];
   const uri = activeClip?.uri ?? null;
@@ -76,6 +71,54 @@ export default function EditorScreen() {
   const [aspectRatio, setAspectRatio] = useState<string>('Original');
   const [transform, setTransform] = useState<TransformState>({ scale: 1, translateX: 0, translateY: 0, rotation: 0 });
   const [resetTrigger, setResetTrigger] = useState<number>(0);
+
+  // Load project on mount if projectId is present, otherwise initialize from urisParam
+  useEffect(() => {
+    if (projectId) {
+      getProject(projectId).then(proj => {
+        if (proj) {
+          setProjectName(proj.name);
+          setClipsData(proj.clips);
+          setSpeed(proj.settings.speed);
+          setBrightness(proj.settings.brightness);
+          setContrast(proj.settings.contrast);
+          setSaturation(proj.settings.saturation);
+          setAspectRatio(proj.settings.aspectRatio);
+          setMusicUri(proj.settings.musicUri || null);
+          setMusicName(proj.settings.musicName || null);
+        }
+        setIsProjectLoading(false);
+      });
+    } else {
+      let initialUris: string[] = [];
+      if (urisParam) {
+        try { initialUris = JSON.parse(urisParam) as string[]; } catch (e) {}
+      }
+      setClipsData(initialUris.map(u => ({ uri: u, trimStart: 0, trimEnd: 0, duration: 0, width: 0, height: 0, thumbnails: [] })));
+      setIsProjectLoading(false);
+    }
+  }, [projectId, urisParam]);
+
+  // Auto-save project when relevant states change
+  useEffect(() => {
+    if (isProjectLoading || clipsData.length === 0) return;
+    
+    const timeout = setTimeout(() => {
+      const project: Project = {
+        id: currentProjectId,
+        name: projectName,
+        createdAt: parseInt(currentProjectId.replace('proj_', ''), 10) || Date.now(),
+        updatedAt: Date.now(),
+        clips: clipsData,
+        settings: {
+          speed, brightness, contrast, saturation, aspectRatio, musicUri, musicName
+        }
+      };
+      saveProject(project);
+    }, 1000); // Debounce saves by 1s
+
+    return () => clearTimeout(timeout);
+  }, [clipsData, speed, brightness, contrast, saturation, aspectRatio, musicUri, musicName, currentProjectId, projectName, isProjectLoading]);
 
   // Load metadata + thumbnails for the active clip
   useEffect(() => {
@@ -390,13 +433,21 @@ export default function EditorScreen() {
     );
   };
 
+  if (isProjectLoading) {
+    return (
+      <ThemedView style={[styles.container, { justifyContent: 'center', alignItems: 'center' }]}>
+        <ActivityIndicator size="large" color={activeColor} />
+      </ThemedView>
+    );
+  }
+
   return (
     <ThemedView style={styles.container}>
       <View style={[styles.header, { paddingTop: insets.top + 8 }]}>
         <TouchableOpacity onPress={() => router.back()} style={styles.iconButton} disabled={isExporting}>
           <Ionicons name="chevron-back" size={28} color={isDark ? Colors.dark.text : Colors.light.text} />
         </TouchableOpacity>
-        <ThemedText style={styles.headerTitle}>Editor</ThemedText>
+        <ThemedText style={styles.headerTitle} numberOfLines={1}>{projectName}</ThemedText>
         <View style={{ flexDirection: 'row', gap: 8 }}>
           <TouchableOpacity style={styles.iconButton} onPress={handleAddClip} disabled={isExporting}>
             <Ionicons name="add-circle-outline" size={28} color={isDark ? Colors.dark.text : Colors.light.text} />

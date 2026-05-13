@@ -1,112 +1,157 @@
-import { Image } from 'expo-image';
-import { Platform, StyleSheet } from 'react-native';
-
-import { Collapsible } from '@/components/ui/collapsible';
-import { ExternalLink } from '@/components/external-link';
+import { StyleSheet, View, Switch, Alert, Platform } from 'react-native';
 import ParallaxScrollView from '@/components/parallax-scroll-view';
 import { ThemedText } from '@/components/themed-text';
 import { ThemedView } from '@/components/themed-view';
 import { IconSymbol } from '@/components/ui/icon-symbol';
-import { Fonts } from '@/constants/theme';
+import { Fonts, Colors } from '@/constants/theme';
+import { useColorScheme } from '@/hooks/use-color-scheme';
+import Constants from 'expo-constants';
+import { Paths, getInfoAsync, readDirectoryAsync, deleteAsync } from 'expo-file-system';
+import { Ionicons } from '@expo/vector-icons';
+import { TouchableOpacity } from 'react-native';
 
-export default function TabTwoScreen() {
+export default function SettingsScreen() {
+  const colorScheme = useColorScheme();
+  const isDark = colorScheme === 'dark';
+
+  const handleClearCache = async () => {
+    try {
+      const cacheDir = `${Paths.cache.uri}`;
+      const dirInfo = await getInfoAsync(cacheDir);
+      
+      if (dirInfo.exists) {
+        Alert.alert(
+          "Clear Cache",
+          "Are you sure you want to clear temporary files? This won't delete your projects.",
+          [
+            { text: "Cancel", style: "cancel" },
+            { 
+              text: "Clear", 
+              style: "destructive",
+              onPress: async () => {
+                const files = await readDirectoryAsync(cacheDir);
+                for (const file of files) {
+                  await deleteAsync(`${cacheDir}${file}`, { idempotent: true });
+                }
+                Alert.alert("Success", "Cache cleared successfully.");
+              }
+            }
+          ]
+        );
+      }
+    } catch (error) {
+      console.error(error);
+      Alert.alert("Error", "Could not clear cache.");
+    }
+  };
+
+  const appVersion = Constants.expoConfig?.version || '1.0.0';
+
   return (
     <ParallaxScrollView
-      headerBackgroundColor={{ light: '#D0D0D0', dark: '#353636' }}
+      headerBackgroundColor={{ light: '#DBEAFE', dark: '#1E3A8A' }}
       headerImage={
         <IconSymbol
-          size={310}
-          color="#808080"
-          name="chevron.left.forwardslash.chevron.right"
+          size={280}
+          color={isDark ? "rgba(255,255,255,0.1)" : "rgba(59, 130, 246, 0.2)"}
+          name="gearshape.fill"
           style={styles.headerImage}
         />
       }>
       <ThemedView style={styles.titleContainer}>
         <ThemedText
           type="title"
-          style={{
-            fontFamily: Fonts.rounded,
-          }}>
-          Explore
+          style={{ fontFamily: Fonts.rounded }}>
+          Settings & Info
         </ThemedText>
       </ThemedView>
-      <ThemedText>This app includes example code to help you get started.</ThemedText>
-      <Collapsible title="File-based routing">
-        <ThemedText>
-          This app has two screens:{' '}
-          <ThemedText type="defaultSemiBold">app/(tabs)/index.tsx</ThemedText> and{' '}
-          <ThemedText type="defaultSemiBold">app/(tabs)/explore.tsx</ThemedText>
+
+      <ThemedView style={styles.section}>
+        <ThemedText style={styles.sectionTitle}>About</ThemedText>
+        <View style={[styles.card, { backgroundColor: isDark ? '#1F2937' : '#F3F4F6' }]}>
+          <View style={styles.row}>
+            <ThemedText>App Version</ThemedText>
+            <ThemedText style={styles.value}>{appVersion}</ThemedText>
+          </View>
+          <View style={styles.divider} />
+          <View style={styles.row}>
+            <ThemedText>Developer</ThemedText>
+            <ThemedText style={styles.value}>Alejo</ThemedText>
+          </View>
+        </View>
+      </ThemedView>
+
+      <ThemedView style={styles.section}>
+        <ThemedText style={styles.sectionTitle}>Storage</ThemedText>
+        <View style={[styles.card, { backgroundColor: isDark ? '#1F2937' : '#F3F4F6' }]}>
+          <TouchableOpacity style={styles.actionRow} onPress={handleClearCache}>
+            <View style={styles.actionIcon}>
+              <Ionicons name="trash-outline" size={24} color="#EF4444" />
+            </View>
+            <ThemedText style={{ flex: 1, color: '#EF4444' }}>Clear Temporary Cache</ThemedText>
+            <Ionicons name="chevron-forward" size={20} color="#9CA3AF" />
+          </TouchableOpacity>
+        </View>
+        <ThemedText style={styles.helpText}>
+          Clearing cache removes generated thumbnails and temporary video exports.
         </ThemedText>
-        <ThemedText>
-          The layout file in <ThemedText type="defaultSemiBold">app/(tabs)/_layout.tsx</ThemedText>{' '}
-          sets up the tab navigator.
-        </ThemedText>
-        <ExternalLink href="https://docs.expo.dev/router/introduction">
-          <ThemedText type="link">Learn more</ThemedText>
-        </ExternalLink>
-      </Collapsible>
-      <Collapsible title="Android, iOS, and web support">
-        <ThemedText>
-          You can open this project on Android, iOS, and the web. To open the web version, press{' '}
-          <ThemedText type="defaultSemiBold">w</ThemedText> in the terminal running this project.
-        </ThemedText>
-      </Collapsible>
-      <Collapsible title="Images">
-        <ThemedText>
-          For static images, you can use the <ThemedText type="defaultSemiBold">@2x</ThemedText> and{' '}
-          <ThemedText type="defaultSemiBold">@3x</ThemedText> suffixes to provide files for
-          different screen densities
-        </ThemedText>
-        <Image
-          source={require('@/assets/images/react-logo.png')}
-          style={{ width: 100, height: 100, alignSelf: 'center' }}
-        />
-        <ExternalLink href="https://reactnative.dev/docs/images">
-          <ThemedText type="link">Learn more</ThemedText>
-        </ExternalLink>
-      </Collapsible>
-      <Collapsible title="Light and dark mode components">
-        <ThemedText>
-          This template has light and dark mode support. The{' '}
-          <ThemedText type="defaultSemiBold">useColorScheme()</ThemedText> hook lets you inspect
-          what the user&apos;s current color scheme is, and so you can adjust UI colors accordingly.
-        </ThemedText>
-        <ExternalLink href="https://docs.expo.dev/develop/user-interface/color-themes/">
-          <ThemedText type="link">Learn more</ThemedText>
-        </ExternalLink>
-      </Collapsible>
-      <Collapsible title="Animations">
-        <ThemedText>
-          This template includes an example of an animated component. The{' '}
-          <ThemedText type="defaultSemiBold">components/HelloWave.tsx</ThemedText> component uses
-          the powerful{' '}
-          <ThemedText type="defaultSemiBold" style={{ fontFamily: Fonts.mono }}>
-            react-native-reanimated
-          </ThemedText>{' '}
-          library to create a waving hand animation.
-        </ThemedText>
-        {Platform.select({
-          ios: (
-            <ThemedText>
-              The <ThemedText type="defaultSemiBold">components/ParallaxScrollView.tsx</ThemedText>{' '}
-              component provides a parallax effect for the header image.
-            </ThemedText>
-          ),
-        })}
-      </Collapsible>
+      </ThemedView>
     </ParallaxScrollView>
   );
 }
 
 const styles = StyleSheet.create({
   headerImage: {
-    color: '#808080',
-    bottom: -90,
-    left: -35,
+    bottom: -60,
+    left: -20,
     position: 'absolute',
   },
   titleContainer: {
     flexDirection: 'row',
     gap: 8,
+    marginBottom: 8,
   },
+  section: {
+    marginTop: 24,
+  },
+  sectionTitle: {
+    fontSize: 18,
+    fontWeight: 'bold',
+    marginBottom: 12,
+    paddingLeft: 4,
+  },
+  card: {
+    borderRadius: 16,
+    overflow: 'hidden',
+  },
+  row: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    paddingVertical: 16,
+    paddingHorizontal: 16,
+  },
+  divider: {
+    height: 1,
+    backgroundColor: 'rgba(150,150,150,0.2)',
+    marginLeft: 16,
+  },
+  value: {
+    opacity: 0.6,
+  },
+  actionRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingVertical: 16,
+    paddingHorizontal: 16,
+  },
+  actionIcon: {
+    marginRight: 12,
+  },
+  helpText: {
+    fontSize: 12,
+    opacity: 0.6,
+    marginTop: 8,
+    paddingHorizontal: 4,
+  }
 });
