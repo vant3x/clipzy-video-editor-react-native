@@ -27,6 +27,10 @@ export function RangeSlider({
   const [width, setWidth] = useState(0);
   const THUMB_SIZE = 28;
 
+  // Dragging states to prevent prop updates from interrupting gestures
+  const isDraggingLow = useRef(false);
+  const isDraggingHigh = useRef(false);
+
   // Current logical values
   const lowRef = useRef(initialLow ?? min);
   const highRef = useRef(initialHigh ?? max);
@@ -35,40 +39,84 @@ export function RangeSlider({
   const panLow = useRef(new Animated.Value(0)).current;
   const panHigh = useRef(new Animated.Value(0)).current;
 
-  // Positions captured at gesture start (fix for dx-accumulation bug)
+  // Positions captured at gesture start
   const lowStartPos = useRef(0);
   const highStartPos = useRef(0);
 
-  const toPos = (value: number, w: number) =>
-    ((value - min) / (max - min)) * (w - THUMB_SIZE);
+  // Store variables in refs so PanResponder callbacks never close over stale state/props
+  const widthRef = useRef(width);
+  const minRef = useRef(min);
+  const maxRef = useRef(max);
+  const onValueChangedRef = useRef(onValueChanged);
+  const onValuesChangingRef = useRef(onValuesChanging);
 
-  const toValue = (pos: number, w: number) =>
-    min + (pos / (w - THUMB_SIZE)) * (max - min);
+  useEffect(() => { widthRef.current = width; }, [width]);
+  useEffect(() => { minRef.current = min; }, [min]);
+  useEffect(() => { maxRef.current = max; }, [max]);
+  useEffect(() => { onValueChangedRef.current = onValueChanged; }, [onValueChanged]);
+  useEffect(() => { onValuesChangingRef.current = onValuesChanging; }, [onValuesChanging]);
 
-  // Initialize / re-initialize when layout or range changes
+  const toPos = (value: number, w: number) => {
+    const minVal = minRef.current;
+    const maxVal = maxRef.current;
+    if (maxVal - minVal <= 0) return 0;
+    return ((value - minVal) / (maxVal - minVal)) * (w - THUMB_SIZE);
+  };
+
+  const toValue = (pos: number, w: number) => {
+    const minVal = minRef.current;
+    const maxVal = maxRef.current;
+    if (w - THUMB_SIZE <= 0) return minVal;
+    return minVal + (pos / (w - THUMB_SIZE)) * (maxVal - minVal);
+  };
+
+  // Sync lowRef and panLow when initialLow prop changes (if not actively dragging)
+  useEffect(() => {
+    if (!isDraggingLow.current) {
+      lowRef.current = initialLow ?? min;
+      if (width > 0) {
+        panLow.setValue(toPos(lowRef.current, width));
+      }
+    }
+  }, [initialLow, min, max, width]);
+
+  // Sync highRef and panHigh when initialHigh prop changes (if not actively dragging)
+  useEffect(() => {
+    if (!isDraggingHigh.current) {
+      highRef.current = initialHigh ?? max;
+      if (width > 0) {
+        panHigh.setValue(toPos(highRef.current, width));
+      }
+    }
+  }, [initialHigh, min, max, width]);
+
+  // Handle width or range boundary changes
   useEffect(() => {
     if (width > 0) {
-      const lp = toPos(lowRef.current, width);
-      const hp = toPos(highRef.current, width);
-      panLow.setValue(lp);
-      panHigh.setValue(hp);
+      panLow.setValue(toPos(lowRef.current, width));
+      panHigh.setValue(toPos(highRef.current, width));
     }
   }, [width, min, max]);
 
   const clampLow = (pos: number) =>
-    Math.max(0, Math.min(pos, toPos(highRef.current, width) - THUMB_SIZE));
+    Math.max(0, Math.min(pos, toPos(highRef.current, widthRef.current) - THUMB_SIZE));
 
   const clampHigh = (pos: number) =>
-    Math.max(toPos(lowRef.current, width) + THUMB_SIZE, Math.min(pos, width - THUMB_SIZE));
+    Math.max(toPos(lowRef.current, widthRef.current) + THUMB_SIZE, Math.min(pos, widthRef.current - THUMB_SIZE));
 
   const commitValues = (lowPos: number, highPos: number, isRelease: boolean) => {
-    if (width === 0) return;
-    lowRef.current = Math.max(min, Math.min(toValue(lowPos, width), max));
-    highRef.current = Math.max(min, Math.min(toValue(highPos, width), max));
+    const w = widthRef.current;
+    if (w === 0) return;
+    const minVal = minRef.current;
+    const maxVal = maxRef.current;
+    
+    lowRef.current = Math.max(minVal, Math.min(toValue(lowPos, w), maxVal));
+    highRef.current = Math.max(minVal, Math.min(toValue(highPos, w), maxVal));
+    
     if (isRelease) {
-      onValueChanged(lowRef.current, highRef.current);
+      onValueChangedRef.current(lowRef.current, highRef.current);
     } else {
-      onValuesChanging?.(lowRef.current, highRef.current);
+      onValuesChangingRef.current?.(lowRef.current, highRef.current);
     }
   };
 
@@ -76,19 +124,25 @@ export function RangeSlider({
     PanResponder.create({
       onStartShouldSetPanResponder: () => true,
       onPanResponderGrant: () => {
-        // Capture starting position ONCE when finger touches thumb
-        lowStartPos.current = toPos(lowRef.current, width);
+        isDraggingLow.current = true;
+        lowStartPos.current = toPos(lowRef.current, widthRef.current);
       },
       onPanResponderMove: (_, gs) => {
+        const w = widthRef.current;
         const newPos = clampLow(lowStartPos.current + gs.dx);
         panLow.setValue(newPos);
-        commitValues(newPos, toPos(highRef.current, width), false);
+        commitValues(newPos, toPos(highRef.current, w), false);
       },
       onPanResponderRelease: (_, gs) => {
+        isDraggingLow.current = false;
+        const w = widthRef.current;
         const newPos = clampLow(lowStartPos.current + gs.dx);
         panLow.setValue(newPos);
-        commitValues(newPos, toPos(highRef.current, width), true);
+        commitValues(newPos, toPos(highRef.current, w), true);
       },
+      onPanResponderTerminate: () => {
+        isDraggingLow.current = false;
+      }
     })
   ).current;
 
@@ -96,18 +150,25 @@ export function RangeSlider({
     PanResponder.create({
       onStartShouldSetPanResponder: () => true,
       onPanResponderGrant: () => {
-        highStartPos.current = toPos(highRef.current, width);
+        isDraggingHigh.current = true;
+        highStartPos.current = toPos(highRef.current, widthRef.current);
       },
       onPanResponderMove: (_, gs) => {
+        const w = widthRef.current;
         const newPos = clampHigh(highStartPos.current + gs.dx);
         panHigh.setValue(newPos);
-        commitValues(toPos(lowRef.current, width), newPos, false);
+        commitValues(toPos(lowRef.current, w), newPos, false);
       },
       onPanResponderRelease: (_, gs) => {
+        isDraggingHigh.current = false;
+        const w = widthRef.current;
         const newPos = clampHigh(highStartPos.current + gs.dx);
         panHigh.setValue(newPos);
-        commitValues(toPos(lowRef.current, width), newPos, true);
+        commitValues(toPos(lowRef.current, w), newPos, true);
       },
+      onPanResponderTerminate: () => {
+        isDraggingHigh.current = false;
+      }
     })
   ).current;
 

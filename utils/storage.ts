@@ -8,6 +8,7 @@ export interface ProjectClip {
   width: number;
   height: number;
   thumbnails: string[];
+  hasAudio: boolean;
 }
 
 export interface ProjectSettings {

@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect, useMemo } from 'react';
-import { StyleSheet, View, TouchableOpacity, ScrollView, Text, ActivityIndicator, Alert, Modal } from 'react-native';
+import { StyleSheet, View, TouchableOpacity, ScrollView, Text, ActivityIndicator, Alert, Modal, Image } from 'react-native';
 import { useLocalSearchParams, router } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { ThemedText } from '@/components/themed-text';
@@ -201,6 +201,70 @@ export default function EditorScreen() {
     setShowExportModal(true);
   };
   
+  const handleDeleteClip = (index: number) => {
+    if (clipsData.length <= 1) {
+      Alert.alert("Cannot delete", "You must have at least one video clip in your project.");
+      return;
+    }
+    Alert.alert(
+      "Delete Clip",
+      `Are you sure you want to delete Clip ${index + 1}?`,
+      [
+        { text: "Cancel", style: "cancel" },
+        {
+          text: "Delete",
+          style: "destructive",
+          onPress: () => {
+            setClipsData(prev => {
+              const updated = prev.filter((_, i) => i !== index);
+              // Adjust active index
+              if (activeClipIndex >= updated.length) {
+                setActiveClipIndex(updated.length - 1);
+              }
+              return updated;
+            });
+          }
+        }
+      ]
+    );
+  };
+
+  const handleSplitClip = () => {
+    if (!activeClip || activeClip.duration === 0) return;
+    
+    const currentTime = player.currentTime;
+    const start = activeClip.trimStart;
+    const end = activeClip.trimEnd;
+    
+    if (currentTime <= start + 0.5 || currentTime >= end - 0.5) {
+      Alert.alert("Cannot Split", "The split point must be at least 0.5 seconds away from the start and end of the clip.");
+      return;
+    }
+    
+    const clipA: ClipData = {
+      ...activeClip,
+      trimEnd: currentTime,
+    };
+    
+    const clipB: ClipData = {
+      ...activeClip,
+      trimStart: currentTime,
+      thumbnails: [...activeClip.thumbnails],
+    };
+    
+    setClipsData(prev => {
+      const next = [...prev];
+      next.splice(activeClipIndex, 1, clipA, clipB);
+      return next;
+    });
+    
+    setTimeout(() => {
+      setActiveClipIndex(activeClipIndex + 1);
+    }, 100);
+    
+    Alert.alert("Clip Split", "The clip has been split into two parts!");
+  };
+
   const handleAddClip = async () => {
     const result = await ImagePicker.launchImageLibraryAsync({
       mediaTypes: ['videos'],
@@ -477,43 +541,86 @@ export default function EditorScreen() {
         </View>
       </View>
 
-      {clipsData.length > 1 && (
-        <View style={{ paddingHorizontal: 16, paddingBottom: 8 }}>
-          <DraggableFlatList
-            horizontal
-            data={clipsData}
-            onDragEnd={({ data }) => {
-              const currentUri = clipsData[activeClipIndex]?.uri;
-              setClipsData(data);
-              const newIndex = data.findIndex(c => c.uri === currentUri);
-              if (newIndex !== -1) setActiveClipIndex(newIndex);
-            }}
-            keyExtractor={(item, index) => `${item.uri}_${index}`}
-            contentContainerStyle={{ gap: 8 }}
-            renderItem={({ item, drag, isActive, getIndex }) => {
-              const i = getIndex() ?? 0;
-              return (
-                <ScaleDecorator>
-                  <TouchableOpacity
-                    onLongPress={drag}
-                    onPress={() => setActiveClipIndex(i)}
-                    style={{
-                      paddingVertical: 6, paddingHorizontal: 14,
-                      backgroundColor: isActive ? '#555' : (i === activeClipIndex ? activeColor : '#2D3748'),
-                      borderRadius: 12,
-                      elevation: isActive ? 5 : 0,
-                      borderWidth: i === activeClipIndex ? 0 : 1,
-                      borderColor: '#4B5563',
-                    }}
-                  >
-                    <Text style={{ color: '#fff', fontSize: 12, fontWeight: '700' }}>Clip {i + 1}</Text>
-                  </TouchableOpacity>
-                </ScaleDecorator>
-              );
-            }}
-          />
+      <View style={styles.timelineContainer}>
+        <View style={styles.timelineHeader}>
+          <ThemedText style={styles.timelineTitle}>Video Timeline</ThemedText>
+          <ThemedText style={styles.timelineSubtitle}>Hold & drag to reorder</ThemedText>
         </View>
-      )}
+        <DraggableFlatList
+          horizontal
+          data={clipsData}
+          onDragEnd={({ data }) => {
+            const currentUri = clipsData[activeClipIndex]?.uri;
+            setClipsData(data);
+            const newIndex = data.findIndex(c => c.uri === currentUri);
+            if (newIndex !== -1) setActiveClipIndex(newIndex);
+          }}
+          keyExtractor={(item, index) => `${item.uri}_${index}`}
+          contentContainerStyle={styles.timelineList}
+          showsHorizontalScrollIndicator={false}
+          renderItem={({ item, drag, isActive, getIndex }) => {
+            const i = getIndex() ?? 0;
+            const isSelected = i === activeClipIndex;
+            const activeDuration = item.duration > 0 ? (item.trimEnd - item.trimStart) : 0;
+            const hasThumb = item.thumbnails && item.thumbnails.length > 0;
+            
+            return (
+              <ScaleDecorator>
+                <TouchableOpacity
+                  onLongPress={drag}
+                  onPress={() => setActiveClipIndex(i)}
+                  style={[
+                    styles.timelineCard,
+                    isSelected && { borderColor: activeColor, borderWidth: 2 },
+                    isActive && { opacity: 0.8 }
+                  ]}
+                  activeOpacity={0.9}
+                >
+                  {hasThumb ? (
+                    <Image
+                      source={{ uri: item.thumbnails[0] }}
+                      style={styles.cardThumbnail}
+                    />
+                  ) : (
+                    <View style={styles.cardPlaceholder}>
+                      <Ionicons name="film-outline" size={20} color="#4B5563" />
+                    </View>
+                  )}
+                  
+                  <View style={styles.cardOverlay}>
+                    <View style={styles.cardHeaderRow}>
+                      <View style={[styles.cardIndexBadge, isSelected && { backgroundColor: activeColor }]}>
+                        <Text style={styles.cardIndexText}>{i + 1}</Text>
+                      </View>
+                      
+                      <TouchableOpacity 
+                        style={styles.cardDeleteButton} 
+                        onPress={() => handleDeleteClip(i)}
+                        hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}
+                      >
+                        <Ionicons name="close-circle" size={18} color="#EF4444" />
+                      </TouchableOpacity>
+                    </View>
+                    
+                    <View style={styles.cardFooterRow}>
+                      <Text style={styles.cardDurationText}>
+                        {activeDuration > 0 ? `${activeDuration.toFixed(1)}s` : '...'}
+                      </Text>
+                    </View>
+                  </View>
+                </TouchableOpacity>
+              </ScaleDecorator>
+            );
+          }}
+          ListFooterComponent={
+            <TouchableOpacity style={styles.timelineAddCard} onPress={handleAddClip}>
+              <Ionicons name="add" size={22} color={activeColor} />
+              <Text style={{ color: activeColor, fontSize: 10, fontWeight: 'bold', marginTop: 1 }}>Add Clip</Text>
+            </TouchableOpacity>
+          }
+          ListFooterComponentStyle={{ justifyContent: 'center', paddingLeft: 8 }}
+        />
+      </View>
 
       <View style={styles.videoContainer}>
         {uri ? (
@@ -544,6 +651,14 @@ export default function EditorScreen() {
             label="Trim" 
             isActive={activeTool === 'trim'} 
             onPress={() => setActiveTool(activeTool === 'trim' ? null : 'trim')} 
+            activeColor={activeColor} 
+            isDark={isDark} 
+          />
+          <ToolbarButton 
+            icon="scissors-outline" 
+            label="Split" 
+            isActive={false} 
+            onPress={handleSplitClip} 
             activeColor={activeColor} 
             isDark={isDark} 
           />
@@ -833,6 +948,113 @@ const styles = StyleSheet.create({
     color: '#FFF',
     fontSize: 16,
     fontWeight: 'bold',
+  },
+  timelineContainer: {
+    paddingHorizontal: 16,
+    paddingBottom: 12,
+    paddingTop: 4,
+  },
+  timelineHeader: {
+    flexDirection: 'row',
+    alignItems: 'baseline',
+    justifyContent: 'space-between',
+    marginBottom: 8,
+    paddingHorizontal: 4,
+  },
+  timelineTitle: {
+    fontSize: 12,
+    fontWeight: '700',
+    textTransform: 'uppercase',
+    letterSpacing: 1,
+    opacity: 0.9,
+  },
+  timelineSubtitle: {
+    fontSize: 10,
+    opacity: 0.5,
+  },
+  timelineList: {
+    gap: 8,
+    paddingRight: 16,
+    height: 76,
+  },
+  timelineCard: {
+    width: 110,
+    height: 64,
+    borderRadius: 12,
+    backgroundColor: '#1E293B',
+    borderWidth: 1.5,
+    borderColor: '#334155',
+    overflow: 'hidden',
+    position: 'relative',
+  },
+  cardThumbnail: {
+    width: '100%',
+    height: '100%',
+    position: 'absolute',
+    resizeMode: 'cover',
+  },
+  cardPlaceholder: {
+    width: '100%',
+    height: '100%',
+    position: 'absolute',
+    justifyContent: 'center',
+    alignItems: 'center',
+    backgroundColor: '#0F172A',
+  },
+  cardOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(15, 23, 42, 0.45)',
+    padding: 6,
+    justifyContent: 'space-between',
+  },
+  cardHeaderRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+  },
+  cardIndexBadge: {
+    width: 18,
+    height: 18,
+    borderRadius: 9,
+    backgroundColor: '#475569',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  cardIndexText: {
+    color: '#FFF',
+    fontSize: 10,
+    fontWeight: 'bold',
+  },
+  cardDeleteButton: {
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.3,
+    shadowRadius: 1,
+    elevation: 2,
+  },
+  cardFooterRow: {
+    alignItems: 'flex-start',
+  },
+  cardDurationText: {
+    color: '#FFF',
+    fontSize: 10,
+    fontWeight: 'bold',
+    backgroundColor: 'rgba(0, 0, 0, 0.6)',
+    paddingVertical: 2,
+    paddingHorizontal: 6,
+    borderRadius: 6,
+    overflow: 'hidden',
+  },
+  timelineAddCard: {
+    width: 76,
+    height: 64,
+    borderRadius: 12,
+    borderWidth: 1.5,
+    borderStyle: 'dashed',
+    borderColor: '#3B82F6',
+    justifyContent: 'center',
+    alignItems: 'center',
+    backgroundColor: 'rgba(59, 130, 246, 0.05)',
   },
 });
 

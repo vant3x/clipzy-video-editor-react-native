@@ -10,11 +10,11 @@ export interface VideoMetadata {
   hasVideo: boolean;
 }
 
-/** Represents a single input clip with optional per-clip trim */
 export interface ClipInput {
   uri: string;
   trim?: { start: number; end: number };
   hasAudio?: boolean;
+  duration?: number;
 }
 
 export interface EditOptions {
@@ -205,9 +205,17 @@ export const processVideo = async (
       // Video: scale + pad to 1080x1920 (portrait default), preserve AR
       scaleFilters += `[${i}:v]scale=1080:1920:force_original_aspect_ratio=decrease,` +
         `pad=1080:1920:(ow-iw)/2:(oh-ih)/2,setsar=1[sv${i}];`;
+      
+      // Calculate active duration for silence track limit
+      let segmentDuration = clips[i].duration || 0;
+      if (clips[i].trim) {
+        segmentDuration = clips[i].trim!.end - clips[i].trim!.start;
+      }
+      if (segmentDuration <= 0) segmentDuration = 5.0;
+
       // Audio: generate silent track if clip lacks audio, otherwise concat fails
       if (clips[i].hasAudio === false) {
-        scaleFilters += `anullsrc=channel_layout=stereo:sample_rate=44100[sa${i}];`;
+        scaleFilters += `anullsrc=channel_layout=stereo:sample_rate=44100:d=${segmentDuration.toFixed(3)}[sa${i}];`;
       } else {
         scaleFilters += `[${i}:a]anull[sa${i}];`;
       }
@@ -240,9 +248,14 @@ export const processVideo = async (
     let aMapSrc = '0:a';
     
     const hasAudio = clips[0].hasAudio !== false;
+    let segmentDuration = clips[0].duration || 0;
+    if (clips[0].trim) {
+      segmentDuration = clips[0].trim!.end - clips[0].trim!.start;
+    }
+    if (segmentDuration <= 0) segmentDuration = 5.0;
 
     if (!hasAudio && (audioFilters.length > 0 || options.musicUri)) {
-      filterParts += `anullsrc=channel_layout=stereo:sample_rate=44100[silence];`;
+      filterParts += `anullsrc=channel_layout=stereo:sample_rate=44100:d=${segmentDuration.toFixed(3)}[silence];`;
       aMapSrc = '[silence]';
     }
 
