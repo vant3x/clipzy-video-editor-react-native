@@ -19,6 +19,8 @@ export interface ProjectSettings {
   aspectRatio: string;
   musicUri?: string | null;
   musicName?: string | null;
+  videoVolume?: number;
+  musicVolume?: number;
 }
 
 export interface Project {

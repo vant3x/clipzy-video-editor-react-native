@@ -25,6 +25,7 @@ interface TransformCanvasProps {
   videoHeight: number;
   onTransformChange: (state: TransformState) => void;
   resetTrigger?: number;
+  brightness?: number; // Real-time preview support
 }
 
 const { width: SCREEN_WIDTH } = Dimensions.get('window');
@@ -36,7 +37,8 @@ export function TransformCanvas({
   videoWidth, 
   videoHeight,
   onTransformChange,
-  resetTrigger
+  resetTrigger,
+  brightness = 0
 }: TransformCanvasProps) {
   
   // Reanimated Shared Values
@@ -95,6 +97,11 @@ export function TransformCanvas({
       updateParent();
     }
   }, [resetTrigger]);
+
+  // Sync transform state to parent on mount or when dimensions change
+  useEffect(() => {
+    updateParent();
+  }, [videoWidth, videoHeight, aspectRatio]);
 
   // Gestures
   const pinchGesture = Gesture.Pinch()
@@ -180,6 +187,20 @@ export function TransformCanvas({
             />
           </Animated.View>
         </GestureDetector>
+        
+        {/* Brightness Preview Overlay */}
+        {brightness !== undefined && Math.abs(brightness) > 0.01 && (
+          <View 
+            style={[
+              StyleSheet.absoluteFillObject,
+              { 
+                backgroundColor: brightness > 0 ? '#FFFFFF' : '#000000',
+                opacity: brightness > 0 ? brightness * 0.45 : Math.abs(brightness) * 0.75
+              }
+            ]} 
+            pointerEvents="none"
+          />
+        )}
       </View>
     </View>
   );

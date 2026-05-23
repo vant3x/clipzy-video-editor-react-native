@@ -1,5 +1,8 @@
-import { useState, useRef, useEffect, useMemo } from 'react';
-import { StyleSheet, View, TouchableOpacity, ScrollView, Text, ActivityIndicator, Alert, Modal, Image } from 'react-native';
+import { useState, useRef, useEffect, useCallback } from 'react';
+import {
+  StyleSheet, View, TouchableOpacity, ScrollView, Text,
+  ActivityIndicator, Alert, Modal, Image
+} from 'react-native';
 import { useLocalSearchParams, router } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { ThemedText } from '@/components/themed-text';
@@ -7,7 +10,7 @@ import { ThemedView } from '@/components/themed-view';
 import { Ionicons } from '@expo/vector-icons';
 import { Colors } from '@/constants/theme';
 import { useColorScheme } from '@/hooks/use-color-scheme';
-import { useVideoPlayer, VideoView } from 'expo-video';
+import { useVideoPlayer } from 'expo-video';
 import Slider from '@react-native-community/slider';
 import { Paths } from 'expo-file-system';
 import * as MediaLibrary from 'expo-media-library';
@@ -19,6 +22,7 @@ import { RangeSlider } from '@/components/ui/RangeSlider';
 import { TransformCanvas, TransformState } from '@/components/ui/TransformCanvas';
 import { saveProject, getProject, Project } from '@/utils/storage';
 
+// ─── Types ────────────────────────────────────────────────────────────────────
 type Tool = 'trim' | 'speed' | 'color' | 'format' | 'music' | null;
 
 interface ClipData {
@@ -32,13 +36,20 @@ interface ClipData {
   hasAudio: boolean;
 }
 
+// ─── Constants ────────────────────────────────────────────────────────────────
+const TIMELINE_HEIGHT = 80;
+const THUMB_CARD_MIN_W = 72;
+const THUMB_CARD_MAX_W = 260;
+const PIXELS_PER_SECOND = 18; // proportional width factor
+
+// ─── Main Component ───────────────────────────────────────────────────────────
 export default function EditorScreen() {
-  const { projectId, uris: urisParam } = useLocalSearchParams<{ projectId?: string, uris?: string }>();
+  const { projectId, uris: urisParam } = useLocalSearchParams<{ projectId?: string; uris?: string }>();
   const colorScheme = useColorScheme();
   const isDark = colorScheme === 'dark';
   const insets = useSafeAreaInsets();
 
-  const [currentProjectId, setCurrentProjectId] = useState<string>(projectId || `proj_${Date.now()}`);
+  const [currentProjectId] = useState<string>(projectId || `proj_${Date.now()}`);
   const [projectName, setProjectName] = useState<string>('My Project');
 
   const [clipsData, setClipsData] = useState<ClipData[]>([]);
@@ -64,16 +75,27 @@ export default function EditorScreen() {
   const [contrast, setContrast] = useState<number>(1.0);
   const [saturation, setSaturation] = useState<number>(1.0);
 
-  // Music state
+  // Music & Volume states
   const [musicUri, setMusicUri] = useState<string | null>(null);
   const [musicName, setMusicName] = useState<string | null>(null);
+  const [videoVolume, setVideoVolume] = useState<number>(1.0);
+  const [musicVolume, setMusicVolume] = useState<number>(0.5);
 
   // Transform states
   const [aspectRatio, setAspectRatio] = useState<string>('Original');
   const [transform, setTransform] = useState<TransformState>({ scale: 1, translateX: 0, translateY: 0, rotation: 0 });
   const [resetTrigger, setResetTrigger] = useState<number>(0);
 
-  // Load project on mount if projectId is present, otherwise initialize from urisParam
+  // Export settings
+  const [exportResolution, setExportResolution] = useState<string>('Original');
+  const [exportFps, setExportFps] = useState<string>('Original');
+
+  // Trim label refs – updated directly during drag without setState to avoid re-renders
+  const trimLabelStartRef = useRef<Text | null>(null);
+  const trimLabelEndRef = useRef<Text | null>(null);
+  const fmt = (s: number) => `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, '0')}`;
+
+  // ─── Load project ────────────────────────────────────────────────────────────
   useEffect(() => {
     if (projectId) {
       getProject(projectId).then(proj => {
@@ -87,23 +109,27 @@ export default function EditorScreen() {
           setAspectRatio(proj.settings.aspectRatio);
           setMusicUri(proj.settings.musicUri || null);
           setMusicName(proj.settings.musicName || null);
+          setVideoVolume(proj.settings.videoVolume ?? 1.0);
+          setMusicVolume(proj.settings.musicVolume ?? 0.5);
         }
         setIsProjectLoading(false);
       });
     } else {
       let initialUris: string[] = [];
       if (urisParam) {
-        try { initialUris = JSON.parse(urisParam) as string[]; } catch (e) {}
+        try { initialUris = JSON.parse(urisParam) as string[]; } catch { }
       }
-      setClipsData(initialUris.map(u => ({ uri: u, trimStart: 0, trimEnd: 0, duration: 0, width: 0, height: 0, thumbnails: [], hasAudio: true })));
+      setClipsData(initialUris.map(u => ({
+        uri: u, trimStart: 0, trimEnd: 0, duration: 0,
+        width: 0, height: 0, thumbnails: [], hasAudio: true,
+      })));
       setIsProjectLoading(false);
     }
   }, [projectId, urisParam]);
 
-  // Auto-save project when relevant states change
+  // ─── Auto-save (debounced 1s) ────────────────────────────────────────────────
   useEffect(() => {
     if (isProjectLoading || clipsData.length === 0) return;
-    
     const timeout = setTimeout(() => {
       const project: Project = {
         id: currentProjectId,
@@ -112,16 +138,17 @@ export default function EditorScreen() {
         updatedAt: Date.now(),
         clips: clipsData,
         settings: {
-          speed, brightness, contrast, saturation, aspectRatio, musicUri, musicName
-        }
+          speed, brightness, contrast, saturation, aspectRatio,
+          musicUri, musicName, videoVolume, musicVolume,
+        },
       };
       saveProject(project);
-    }, 1000); // Debounce saves by 1s
-
+    }, 1000);
     return () => clearTimeout(timeout);
-  }, [clipsData, speed, brightness, contrast, saturation, aspectRatio, musicUri, musicName, currentProjectId, projectName, isProjectLoading]);
+  }, [clipsData, speed, brightness, contrast, saturation, aspectRatio,
+    musicUri, musicName, videoVolume, musicVolume, currentProjectId, projectName, isProjectLoading]);
 
-  // Preload metadata for all clips that don't have it yet
+  // ─── Load metadata for new clips ─────────────────────────────────────────────
   useEffect(() => {
     clipsData.forEach((clip, index) => {
       if (clip.duration === 0) {
@@ -130,13 +157,13 @@ export default function EditorScreen() {
             setClipsData(prev => {
               const next = [...prev];
               if (next[index] && next[index].duration === 0) {
-                next[index] = { 
-                  ...next[index], 
-                  duration: metadata.duration, 
-                  trimEnd: metadata.duration, 
-                  width: metadata.width, 
-                  height: metadata.height, 
-                  hasAudio: metadata.hasAudio 
+                next[index] = {
+                  ...next[index],
+                  duration: metadata.duration,
+                  trimEnd: metadata.duration,
+                  width: metadata.width,
+                  height: metadata.height,
+                  hasAudio: metadata.hasAudio,
                 };
               }
               return next;
@@ -147,125 +174,88 @@ export default function EditorScreen() {
     });
   }, [clipsData]);
 
-  // Load thumbnails ONLY for the active clip
+  // ─── Load thumbnails for active clip only ────────────────────────────────────
   useEffect(() => {
     if (!activeClip || activeClip.duration === 0 || activeClip.thumbnails.length > 0) return;
-    generateThumbnails(activeClip.uri, activeClip.duration, 8).then(thumbs => {
+    generateThumbnails(activeClip.uri, activeClip.duration, 10).then(thumbs => {
       setClipsData(prev => prev.map((c, i) =>
         i === activeClipIndex ? { ...c, thumbnails: thumbs } : c
       ));
     });
   }, [activeClipIndex, activeClip?.duration, activeClip?.thumbnails.length, activeClip?.uri]);
 
-  // Loop playback within trimmed range of active clip
+  // ─── Playback loop respecting trim boundaries ─────────────────────────────────
   useEffect(() => {
-    if (!activeClip) return;
-    let interval: NodeJS.Timeout;
-    if (isPlaying && activeTool === 'trim' && activeClip.duration > 0) {
-      interval = setInterval(() => {
-        if (player) {
-          if (player.currentTime >= activeClip.trimEnd) {
-            player.currentTime = activeClip.trimStart;
-          } else if (player.currentTime < activeClip.trimStart) {
-            player.currentTime = activeClip.trimStart;
-          }
+    if (!activeClip || !player || activeClip.duration === 0) return;
+    // Seek to start of trimmed region when switching clips
+    if (player.currentTime < activeClip.trimStart || player.currentTime > activeClip.trimEnd) {
+      player.currentTime = activeClip.trimStart;
+    }
+    const interval = setInterval(() => {
+      if (player && isPlaying) {
+        if (player.currentTime >= activeClip.trimEnd) {
+          player.currentTime = activeClip.trimStart;
+          player.play();
+        } else if (player.currentTime < activeClip.trimStart) {
+          player.currentTime = activeClip.trimStart;
+          player.play();
         }
-      }, 100);
-    }
+      }
+    }, 100);
     return () => clearInterval(interval);
-  }, [isPlaying, activeTool, activeClip?.trimStart, activeClip?.trimEnd, player, activeClip?.duration]);
-  
-  // Export states
-  const [exportResolution, setExportResolution] = useState<string>('Original'); // 'Original', '1280x720', '1920x1080', '3840x2160'
-  const [exportFps, setExportFps] = useState<string>('Original'); // 'Original', '30', '60'
+  }, [activeClip?.uri, activeClip?.trimStart, activeClip?.trimEnd, isPlaying, player]);
 
-  const togglePlayPause = () => {
-    if (isPlaying) {
-      player.pause();
-    } else {
-      player.play();
-    }
-    setIsPlaying(!isPlaying);
-  };
-
-  // When speed changes, apply to player if possible (expo-video supports playbackRate)
+  // ─── Sync speed to player ────────────────────────────────────────────────────
   useEffect(() => {
-    if (player) {
-      player.playbackRate = speed;
-    }
+    if (player) player.playbackRate = speed;
   }, [speed, player]);
 
   const activeColor = isDark ? Colors.dark.tint : Colors.light.tint;
 
-  const handleExport = () => {
-    setShowExportModal(true);
-  };
-  
-  const handleDeleteClip = (index: number) => {
-    if (clipsData.length <= 1) {
-      Alert.alert("Cannot delete", "You must have at least one video clip in your project.");
-      return;
-    }
-    Alert.alert(
-      "Delete Clip",
-      `Are you sure you want to delete Clip ${index + 1}?`,
-      [
-        { text: "Cancel", style: "cancel" },
-        {
-          text: "Delete",
-          style: "destructive",
-          onPress: () => {
-            setClipsData(prev => {
-              const updated = prev.filter((_, i) => i !== index);
-              // Adjust active index
-              if (activeClipIndex >= updated.length) {
-                setActiveClipIndex(updated.length - 1);
-              }
-              return updated;
-            });
-          }
-        }
-      ]
-    );
-  };
+  // ─── Handlers ────────────────────────────────────────────────────────────────
+  const togglePlayPause = useCallback(() => {
+    if (isPlaying) { player.pause(); } else { player.play(); }
+    setIsPlaying(p => !p);
+  }, [isPlaying, player]);
 
-  const handleSplitClip = () => {
-    if (!activeClip || activeClip.duration === 0) return;
-    
-    const currentTime = player.currentTime;
-    const start = activeClip.trimStart;
-    const end = activeClip.trimEnd;
-    
-    if (currentTime <= start + 0.5 || currentTime >= end - 0.5) {
-      Alert.alert("Cannot Split", "The split point must be at least 0.5 seconds away from the start and end of the clip.");
+  const handleDeleteClip = useCallback((index: number) => {
+    if (clipsData.length <= 1) {
+      Alert.alert('Cannot delete', 'You must have at least one video clip in your project.');
       return;
     }
-    
-    const clipA: ClipData = {
-      ...activeClip,
-      trimEnd: currentTime,
-    };
-    
-    const clipB: ClipData = {
-      ...activeClip,
-      trimStart: currentTime,
-      thumbnails: [...activeClip.thumbnails],
-    };
-    
+    Alert.alert('Delete Clip', `Delete Clip ${index + 1}?`, [
+      { text: 'Cancel', style: 'cancel' },
+      {
+        text: 'Delete', style: 'destructive',
+        onPress: () => setClipsData(prev => {
+          const updated = prev.filter((_, i) => i !== index);
+          if (activeClipIndex >= updated.length) setActiveClipIndex(updated.length - 1);
+          return updated;
+        }),
+      },
+    ]);
+  }, [clipsData.length, activeClipIndex]);
+
+  const handleSplitClip = useCallback(() => {
+    if (!activeClip || activeClip.duration === 0) return;
+    const currentTime = player.currentTime;
+    const { trimStart, trimEnd } = activeClip;
+    if (currentTime <= trimStart + 0.5 || currentTime >= trimEnd - 0.5) {
+      Alert.alert('Cannot Split', 'The split point must be at least 0.5s away from the start/end.');
+      return;
+    }
+    const clipA: ClipData = { ...activeClip, trimEnd: currentTime };
+    const clipB: ClipData = { ...activeClip, trimStart: currentTime, thumbnails: [...activeClip.thumbnails] };
     setClipsData(prev => {
       const next = [...prev];
       next.splice(activeClipIndex, 1, clipA, clipB);
       return next;
     });
-    
-    setTimeout(() => {
-      setActiveClipIndex(activeClipIndex + 1);
-    }, 100);
-    
-    Alert.alert("Clip Split", "The clip has been split into two parts!");
-  };
+    setTimeout(() => setActiveClipIndex(activeClipIndex + 1), 100);
+    Alert.alert('Clip Split ✂️', 'The clip has been split into two parts!');
+  }, [activeClip, player, activeClipIndex]);
 
-  const handleAddClip = async () => {
+  const handleAddClip = useCallback(async () => {
     const result = await ImagePicker.launchImageLibraryAsync({
       mediaTypes: ['videos'],
       allowsEditing: false,
@@ -274,11 +264,12 @@ export default function EditorScreen() {
     });
     if (!result.canceled && result.assets) {
       const newClips: ClipData[] = result.assets.map(a => ({
-        uri: a.uri, trimStart: 0, trimEnd: 0, duration: 0, width: 0, height: 0, thumbnails: [], hasAudio: true
+        uri: a.uri, trimStart: 0, trimEnd: 0, duration: 0,
+        width: 0, height: 0, thumbnails: [], hasAudio: true,
       }));
       setClipsData(prev => [...prev, ...newClips]);
     }
-  };
+  }, []);
 
   const executeExport = async () => {
     if (clipsData.length === 0) return;
@@ -291,26 +282,21 @@ export default function EditorScreen() {
     try {
       setIsExporting(true);
       const outputUri = `${Paths.cache.uri}output_${Date.now()}.mp4`;
-
-      // Build per-clip inputs with individual trims
       const clipInputs: ClipInput[] = clipsData.map(c => ({
         uri: c.uri,
         hasAudio: c.hasAudio,
+        duration: c.duration,
         ...(c.duration > 0 && (c.trimStart > 0 || c.trimEnd < c.duration)
           ? { trim: { start: c.trimStart, end: c.trimEnd } }
           : {}),
       }));
-
       const options: any = {
         speed,
         color: { brightness, contrast, saturation },
-        transform: {
-          scale: transform.scale,
-          translateX: transform.translateX,
-          translateY: transform.translateY,
-          rotation: transform.rotation,
-          targetRatio: aspectRatio,
-        },
+        // Spread transform so canvasWidth/canvasHeight are included (avoids NaN in FFmpeg)
+        transform: { ...transform, targetRatio: aspectRatio },
+        videoVolume,
+        musicVolume,
       };
       if (musicUri) options.musicUri = musicUri;
       if (exportResolution !== 'Original') options.resolution = exportResolution;
@@ -319,9 +305,9 @@ export default function EditorScreen() {
       const success = await processVideo(clipInputs, outputUri, options);
       if (success) {
         await MediaLibrary.saveToLibraryAsync(outputUri);
-        Alert.alert('✅ Exported', 'Video saved to your gallery!');
+        Alert.alert('✅ Exported!', 'Video saved to your gallery!');
       } else {
-        Alert.alert('Export Failed', 'FFmpeg could not process the video. Check that all clips have video streams.');
+        Alert.alert('Export Failed', 'FFmpeg could not process the video. Check the logs for details.');
       }
     } catch (error) {
       console.error(error);
@@ -331,15 +317,16 @@ export default function EditorScreen() {
     }
   };
 
+  // ─── Tool Panel Renderer ──────────────────────────────────────────────────────
   const renderToolOptions = () => {
     if (activeTool === 'speed') {
       return (
         <View style={styles.toolOptionsContainer}>
-          <ThemedText style={styles.toolTitle}>Speed</ThemedText>
+          <ThemedText style={styles.toolTitle}>Playback Speed</ThemedText>
           <View style={styles.speedOptions}>
-            {[0.5, 1.0, 2.0].map((s) => (
-              <TouchableOpacity 
-                key={s} 
+            {[0.25, 0.5, 1.0, 1.5, 2.0, 3.0].map(s => (
+              <TouchableOpacity
+                key={s}
                 style={[styles.speedButton, speed === s && { backgroundColor: activeColor }]}
                 onPress={() => setSpeed(s)}
               >
@@ -353,15 +340,13 @@ export default function EditorScreen() {
 
     if (activeTool === 'color') {
       return (
-        <View style={styles.toolOptionsContainer}>
+        <ScrollView style={styles.toolOptionsContainer} showsVerticalScrollIndicator={false}>
           <ThemedText style={styles.toolTitle}>Color Adjustments</ThemedText>
-          
+
           <ThemedText style={styles.sliderLabel}>Brightness: {brightness.toFixed(2)}</ThemedText>
           <Slider
-            style={{width: '100%', height: 40}}
-            minimumValue={-1}
-            maximumValue={1}
-            value={brightness}
+            style={{ width: '100%', height: 36 }}
+            minimumValue={-1} maximumValue={1} value={brightness}
             onValueChange={setBrightness}
             minimumTrackTintColor={activeColor}
             maximumTrackTintColor={isDark ? '#333' : '#ddd'}
@@ -370,10 +355,8 @@ export default function EditorScreen() {
 
           <ThemedText style={styles.sliderLabel}>Contrast: {contrast.toFixed(2)}</ThemedText>
           <Slider
-            style={{width: '100%', height: 40}}
-            minimumValue={0}
-            maximumValue={2}
-            value={contrast}
+            style={{ width: '100%', height: 36 }}
+            minimumValue={0} maximumValue={2} value={contrast}
             onValueChange={setContrast}
             minimumTrackTintColor={activeColor}
             maximumTrackTintColor={isDark ? '#333' : '#ddd'}
@@ -382,47 +365,56 @@ export default function EditorScreen() {
 
           <ThemedText style={styles.sliderLabel}>Saturation: {saturation.toFixed(2)}</ThemedText>
           <Slider
-            style={{width: '100%', height: 40}}
-            minimumValue={0}
-            maximumValue={3}
-            value={saturation}
+            style={{ width: '100%', height: 36 }}
+            minimumValue={0} maximumValue={3} value={saturation}
             onValueChange={setSaturation}
             minimumTrackTintColor={activeColor}
             maximumTrackTintColor={isDark ? '#333' : '#ddd'}
             thumbTintColor={activeColor}
           />
-        </View>
+        </ScrollView>
       );
     }
 
     if (activeTool === 'trim') {
-      const fmt = (s: number) => `${Math.floor(s/60)}:${String(Math.floor(s%60)).padStart(2,'0')}`;
       return (
         <View style={styles.toolOptionsContainer}>
           <ThemedText style={styles.toolTitle}>Trim — Clip {activeClipIndex + 1}</ThemedText>
           {activeClip && activeClip.duration > 0 ? (
             <View style={{ width: '100%', paddingHorizontal: 10 }}>
               <View style={{ flexDirection: 'row', justifyContent: 'space-between', marginBottom: 8 }}>
-                <ThemedText style={styles.sliderLabel}>Start: {fmt(activeClip.trimStart)}</ThemedText>
-                <ThemedText style={styles.sliderLabel}>End: {fmt(activeClip.trimEnd)}</ThemedText>
+                {/* Refs let us update text without triggering full re-render during drag */}
+                <Text
+                  ref={trimLabelStartRef}
+                  style={[styles.sliderLabel, { color: isDark ? '#AAA' : '#555' }]}
+                >
+                  Start: {fmt(activeClip.trimStart)}
+                </Text>
+                <Text
+                  ref={trimLabelEndRef}
+                  style={[styles.sliderLabel, { color: isDark ? '#AAA' : '#555' }]}
+                >
+                  End: {fmt(activeClip.trimEnd)}
+                </Text>
               </View>
-              {/* key forces remount when switching clips so refs reinitialize */}
               <RangeSlider
-                key={`rs-${activeClipIndex}`}
+                key={`rs-${activeClipIndex}-${activeClip.uri}`}
                 min={0}
                 max={activeClip.duration}
                 initialLow={activeClip.trimStart}
                 initialHigh={activeClip.trimEnd}
+                onValuesChanging={(low, high) => {
+                  // Ultra-light: only update player position and ref labels during drag
+                  if (player) player.currentTime = low;
+                  trimLabelStartRef.current?.setNativeProps({ text: `Start: ${fmt(low)}` });
+                  trimLabelEndRef.current?.setNativeProps({ text: `End: ${fmt(high)}` });
+                }}
                 onValueChanged={(low, high) => {
+                  // Only commit to state on release — no heavy re-renders during drag
                   setClipsData(prev => prev.map((c, i) =>
                     i === activeClipIndex ? { ...c, trimStart: low, trimEnd: high } : c
                   ));
                   if (player) player.currentTime = low;
-                }}
-                onValuesChanging={(low, high) => {
-                  setClipsData(prev => prev.map((c, i) =>
-                    i === activeClipIndex ? { ...c, trimStart: low, trimEnd: high } : c
-                  ));
                 }}
                 activeColor={activeColor}
                 thumbnails={activeClip.thumbnails}
@@ -440,19 +432,22 @@ export default function EditorScreen() {
         <View style={styles.toolOptionsContainer}>
           <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
             <ThemedText style={styles.toolTitle}>Aspect Ratio</ThemedText>
-            <TouchableOpacity onPress={() => setResetTrigger(prev => prev + 1)} style={{ padding: 4, backgroundColor: '#333', borderRadius: 4, flexDirection: 'row', alignItems: 'center', gap: 4 }}>
-              <Ionicons name="refresh-outline" size={16} color="#FFF" />
+            <TouchableOpacity
+              onPress={() => setResetTrigger(p => p + 1)}
+              style={{ padding: 6, backgroundColor: '#333', borderRadius: 8, flexDirection: 'row', alignItems: 'center', gap: 4 }}
+            >
+              <Ionicons name="refresh-outline" size={14} color="#FFF" />
               <Text style={{ color: '#FFF', fontSize: 12 }}>Reset</Text>
             </TouchableOpacity>
           </View>
           <View style={{ flexDirection: 'row', justifyContent: 'space-around' }}>
-            {['Original', '16:9', '9:16', '1:1'].map((fmt) => (
-              <TouchableOpacity 
-                key={fmt} 
-                style={[{ paddingVertical: 8, paddingHorizontal: 16, borderRadius: 20, backgroundColor: '#333' }, aspectRatio === fmt && { backgroundColor: activeColor }]}
-                onPress={() => setAspectRatio(fmt)}
+            {['Original', '16:9', '9:16', '1:1'].map(r => (
+              <TouchableOpacity
+                key={r}
+                style={[styles.ratioBtn, aspectRatio === r && { backgroundColor: activeColor }]}
+                onPress={() => setAspectRatio(r)}
               >
-                <Text style={[{ color: '#AAA', fontWeight: 'bold' }, aspectRatio === fmt && { color: '#FFF' }]}>{fmt}</Text>
+                <Text style={[styles.ratioBtnText, aspectRatio === r && { color: '#FFF' }]}>{r}</Text>
               </TouchableOpacity>
             ))}
           </View>
@@ -463,55 +458,81 @@ export default function EditorScreen() {
     if (activeTool === 'music') {
       const pickAudio = async () => {
         try {
-          const result = await DocumentPicker.getDocumentAsync({
-            type: 'audio/*',
-            copyToCacheDirectory: true,
-          });
-          if (!result.canceled && result.assets && result.assets.length > 0) {
+          const result = await DocumentPicker.getDocumentAsync({ type: 'audio/*', copyToCacheDirectory: true });
+          if (!result.canceled && result.assets?.length > 0) {
             setMusicUri(result.assets[0].uri);
             setMusicName(result.assets[0].name);
           }
-        } catch (err) {
-          console.log('Error picking audio', err);
-        }
+        } catch (err) { console.log('Error picking audio', err); }
       };
 
       return (
-        <View style={styles.toolOptionsContainer}>
-          <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
+        <ScrollView style={styles.toolOptionsContainer} showsVerticalScrollIndicator={false}>
+          <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
             <ThemedText style={styles.toolTitle}>Background Music</ThemedText>
             {musicUri && (
-              <TouchableOpacity onPress={() => { setMusicUri(null); setMusicName(null); }} style={{ padding: 4, backgroundColor: '#333', borderRadius: 4, flexDirection: 'row', alignItems: 'center', gap: 4 }}>
-                <Ionicons name="trash-outline" size={16} color="#ef4444" />
-                <Text style={{ color: '#ef4444', fontSize: 12 }}>Remove</Text>
+              <TouchableOpacity
+                onPress={() => { setMusicUri(null); setMusicName(null); }}
+                style={{ padding: 6, backgroundColor: '#3A1215', borderRadius: 8, flexDirection: 'row', alignItems: 'center', gap: 4 }}
+              >
+                <Ionicons name="trash-outline" size={14} color="#EF4444" />
+                <Text style={{ color: '#EF4444', fontSize: 12 }}>Remove</Text>
               </TouchableOpacity>
             )}
           </View>
-          <View style={{ alignItems: 'center' }}>
-            <TouchableOpacity 
-              style={[styles.button, { backgroundColor: isDark ? Colors.dark.tint : Colors.light.tint, width: 'auto', paddingHorizontal: 20, paddingVertical: 12, flexDirection: 'row', gap: 8, alignItems: 'center', borderRadius: 16 }]} 
-              onPress={pickAudio}
-            >
-              <Ionicons name="musical-notes-outline" size={20} color="#FFF" />
-              <ThemedText style={{ color: '#FFF', fontSize: 16, fontWeight: 'bold' }}>{musicUri ? 'Change Audio' : 'Select Audio File'}</ThemedText>
-            </TouchableOpacity>
-            {musicName && (
-              <ThemedText style={{ marginTop: 12, fontSize: 12, color: '#AAA' }} numberOfLines={1}>Selected: {musicName}</ThemedText>
-            )}
+
+          <TouchableOpacity
+            style={[styles.musicPickBtn, { backgroundColor: activeColor }]}
+            onPress={pickAudio}
+          >
+            <Ionicons name="musical-notes-outline" size={18} color="#FFF" />
+            <Text style={styles.musicPickBtnText}>{musicUri ? 'Change Audio File' : 'Select Audio File'}</Text>
+          </TouchableOpacity>
+
+          {musicName && (
+            <Text style={styles.musicFileName} numberOfLines={1}>🎵 {musicName}</Text>
+          )}
+
+          <View style={{ marginTop: 16 }}>
+            <Text style={styles.volLabel}>Video Volume: {Math.round(videoVolume * 100)}%</Text>
+            <Slider
+              style={{ width: '100%', height: 36 }}
+              minimumValue={0} maximumValue={1} value={videoVolume}
+              onValueChange={setVideoVolume}
+              minimumTrackTintColor={activeColor}
+              maximumTrackTintColor={isDark ? '#333' : '#ddd'}
+              thumbTintColor={activeColor}
+            />
+            {musicUri && <>
+              <Text style={styles.volLabel}>Music Volume: {Math.round(musicVolume * 100)}%</Text>
+              <Slider
+                style={{ width: '100%', height: 36 }}
+                minimumValue={0} maximumValue={1} value={musicVolume}
+                onValueChange={setMusicVolume}
+                minimumTrackTintColor='#A855F7'
+                maximumTrackTintColor={isDark ? '#333' : '#ddd'}
+                thumbTintColor='#A855F7'
+              />
+            </>}
           </View>
-        </View>
+        </ScrollView>
       );
     }
 
+    // Default: play/pause
     return (
       <View style={styles.controlsContainer}>
-        <TouchableOpacity onPress={togglePlayPause} style={styles.playButton}>
-          <Ionicons name={isPlaying ? "pause" : "play"} size={32} color="#FFF" />
+        <TouchableOpacity onPress={togglePlayPause} style={[styles.playButton, { backgroundColor: activeColor }]}>
+          <Ionicons name={isPlaying ? 'pause' : 'play'} size={30} color="#FFF" />
         </TouchableOpacity>
+        {activeClip?.hasAudio === false && (
+          <Text style={{ color: '#F59E0B', fontSize: 11, marginTop: 6 }}>⚠️ No audio track</Text>
+        )}
       </View>
     );
   };
 
+  // ─── Loading State ────────────────────────────────────────────────────────────
   if (isProjectLoading) {
     return (
       <ThemedView style={[styles.container, { justifyContent: 'center', alignItems: 'center' }]}>
@@ -520,32 +541,36 @@ export default function EditorScreen() {
     );
   }
 
+  // ─── Main Render ──────────────────────────────────────────────────────────────
   return (
     <ThemedView style={styles.container}>
+
+      {/* ── Header ── */}
       <View style={[styles.header, { paddingTop: insets.top + 8 }]}>
         <TouchableOpacity onPress={() => router.back()} style={styles.iconButton} disabled={isExporting}>
-          <Ionicons name="chevron-back" size={28} color={isDark ? Colors.dark.text : Colors.light.text} />
+          <Ionicons name="chevron-back" size={26} color={isDark ? Colors.dark.text : Colors.light.text} />
         </TouchableOpacity>
         <ThemedText style={styles.headerTitle} numberOfLines={1}>{projectName}</ThemedText>
-        <View style={{ flexDirection: 'row', gap: 8 }}>
+        <View style={{ flexDirection: 'row', gap: 4 }}>
           <TouchableOpacity style={styles.iconButton} onPress={handleAddClip} disabled={isExporting}>
-            <Ionicons name="add-circle-outline" size={28} color={isDark ? Colors.dark.text : Colors.light.text} />
+            <Ionicons name="add-circle-outline" size={26} color={isDark ? Colors.dark.text : Colors.light.text} />
           </TouchableOpacity>
-          <TouchableOpacity style={styles.iconButton} onPress={handleExport} disabled={isExporting}>
-            {isExporting ? (
-              <ActivityIndicator color={activeColor} />
-            ) : (
-              <Ionicons name="download-outline" size={28} color={activeColor} />
-            )}
+          <TouchableOpacity style={styles.iconButton} onPress={() => setShowExportModal(true)} disabled={isExporting}>
+            {isExporting
+              ? <ActivityIndicator color={activeColor} />
+              : <Ionicons name="download-outline" size={26} color={activeColor} />
+            }
           </TouchableOpacity>
         </View>
       </View>
 
+      {/* ── Timeline (Filmstrip) ── */}
       <View style={styles.timelineContainer}>
         <View style={styles.timelineHeader}>
-          <ThemedText style={styles.timelineTitle}>Video Timeline</ThemedText>
-          <ThemedText style={styles.timelineSubtitle}>Hold & drag to reorder</ThemedText>
+          <Text style={[styles.timelineTitle, { color: isDark ? '#94A3B8' : '#64748B' }]}>TIMELINE</Text>
+          <Text style={[styles.timelineSubtitle, { color: isDark ? '#475569' : '#94A3B8' }]}>Hold to reorder · Tap to select</Text>
         </View>
+
         <DraggableFlatList
           horizontal
           data={clipsData}
@@ -562,156 +587,166 @@ export default function EditorScreen() {
             const i = getIndex() ?? 0;
             const isSelected = i === activeClipIndex;
             const activeDuration = item.duration > 0 ? (item.trimEnd - item.trimStart) : 0;
-            const hasThumb = item.thumbnails && item.thumbnails.length > 0;
-            
+            // Proportional width: clamp between min and max
+            const cardW = item.duration > 0
+              ? Math.max(THUMB_CARD_MIN_W, Math.min(THUMB_CARD_MAX_W, Math.round(activeDuration * PIXELS_PER_SECOND)))
+              : THUMB_CARD_MIN_W;
+
             return (
               <ScaleDecorator>
                 <TouchableOpacity
                   onLongPress={drag}
-                  onPress={() => setActiveClipIndex(i)}
+                  onPress={() => {
+                    setActiveClipIndex(i);
+                    if (item.trimStart !== undefined && player) {
+                      player.currentTime = item.trimStart;
+                    }
+                  }}
                   style={[
                     styles.timelineCard,
-                    isSelected && { borderColor: activeColor, borderWidth: 2 },
-                    isActive && { opacity: 0.8 }
+                    { width: cardW },
+                    isSelected && { borderColor: activeColor, borderWidth: 2.5 },
+                    isActive && { opacity: 0.75, transform: [{ scale: 1.04 }] },
                   ]}
-                  activeOpacity={0.9}
+                  activeOpacity={0.85}
                 >
-                  {hasThumb ? (
-                    <Image
-                      source={{ uri: item.thumbnails[0] }}
-                      style={styles.cardThumbnail}
-                    />
+                  {/* Filmstrip: multiple thumbnails side by side */}
+                  {item.thumbnails.length > 0 ? (
+                    <View style={[StyleSheet.absoluteFillObject, { flexDirection: 'row' }]}>
+                      {item.thumbnails.slice(0, Math.ceil(cardW / 40)).map((t, ti) => (
+                        <Image
+                          key={ti}
+                          source={{ uri: t }}
+                          style={{ flex: 1, height: '100%' }}
+                          resizeMode="cover"
+                        />
+                      ))}
+                    </View>
                   ) : (
-                    <View style={styles.cardPlaceholder}>
-                      <Ionicons name="film-outline" size={20} color="#4B5563" />
+                    <View style={[StyleSheet.absoluteFillObject, styles.cardPlaceholder]}>
+                      {item.duration === 0
+                        ? <ActivityIndicator size="small" color="#4B5563" />
+                        : <Ionicons name="film-outline" size={18} color="#4B5563" />
+                      }
                     </View>
                   )}
-                  
-                  <View style={styles.cardOverlay}>
+
+                  {/* Dark gradient overlay */}
+                  <View style={[StyleSheet.absoluteFillObject, styles.cardOverlay]}>
+                    {/* Top row: index badge + delete */}
                     <View style={styles.cardHeaderRow}>
                       <View style={[styles.cardIndexBadge, isSelected && { backgroundColor: activeColor }]}>
                         <Text style={styles.cardIndexText}>{i + 1}</Text>
                       </View>
-                      
-                      <TouchableOpacity 
-                        style={styles.cardDeleteButton} 
+                      <TouchableOpacity
                         onPress={() => handleDeleteClip(i)}
                         hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}
+                        style={styles.cardDeleteBtn}
                       >
-                        <Ionicons name="close-circle" size={18} color="#EF4444" />
+                        <Ionicons name="close-circle" size={16} color="#EF4444" />
                       </TouchableOpacity>
                     </View>
-                    
-                    <View style={styles.cardFooterRow}>
+
+                    {/* Bottom row: duration */}
+                    <View>
                       <Text style={styles.cardDurationText}>
-                        {activeDuration > 0 ? `${activeDuration.toFixed(1)}s` : '...'}
+                        {activeDuration > 0 ? `${activeDuration.toFixed(1)}s` : '…'}
                       </Text>
+                      {item.hasAudio === false && (
+                        <Text style={styles.cardNoAudioText}>silent</Text>
+                      )}
                     </View>
                   </View>
+
+                  {/* Active selection glow */}
+                  {isSelected && (
+                    <View style={[StyleSheet.absoluteFillObject, {
+                      borderRadius: 10,
+                      borderWidth: 2.5,
+                      borderColor: activeColor,
+                    }]} pointerEvents="none" />
+                  )}
                 </TouchableOpacity>
               </ScaleDecorator>
             );
           }}
           ListFooterComponent={
             <TouchableOpacity style={styles.timelineAddCard} onPress={handleAddClip}>
-              <Ionicons name="add" size={22} color={activeColor} />
-              <Text style={{ color: activeColor, fontSize: 10, fontWeight: 'bold', marginTop: 1 }}>Add Clip</Text>
+              <Ionicons name="add" size={20} color={activeColor} />
+              <Text style={{ color: activeColor, fontSize: 9, fontWeight: '700', marginTop: 2 }}>ADD</Text>
             </TouchableOpacity>
           }
-          ListFooterComponentStyle={{ justifyContent: 'center', paddingLeft: 8 }}
+          ListFooterComponentStyle={{ justifyContent: 'center', paddingLeft: 6 }}
         />
       </View>
 
+      {/* ── Video Preview ── */}
       <View style={styles.videoContainer}>
         {uri ? (
-          <TransformCanvas 
+          <TransformCanvas
             player={player}
             aspectRatio={aspectRatio}
             videoWidth={activeClip?.width ?? 0}
             videoHeight={activeClip?.height ?? 0}
             onTransformChange={setTransform}
             resetTrigger={resetTrigger}
+            brightness={brightness}
           />
         ) : (
           <View style={styles.placeholderVideo}>
-            <Ionicons name="alert-circle-outline" size={48} color="#999" />
+            <Ionicons name="film-outline" size={48} color="#999" />
             <ThemedText>No video selected</ThemedText>
           </View>
         )}
       </View>
 
+      {/* ── Tool Panel ── */}
       <View style={styles.toolArea}>
         {renderToolOptions()}
       </View>
 
-      <View style={[styles.toolbarContainer, { paddingBottom: Math.max(insets.bottom, 16) }]}>
+      {/* ── Toolbar ── */}
+      <View style={[styles.toolbarContainer, { paddingBottom: Math.max(insets.bottom, 14) }]}>
         <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.toolbar}>
-          <ToolbarButton 
-            icon="cut-outline" 
-            label="Trim" 
-            isActive={activeTool === 'trim'} 
-            onPress={() => setActiveTool(activeTool === 'trim' ? null : 'trim')} 
-            activeColor={activeColor} 
-            isDark={isDark} 
-          />
-          <ToolbarButton 
-            icon="scissors-outline" 
-            label="Split" 
-            isActive={false} 
-            onPress={handleSplitClip} 
-            activeColor={activeColor} 
-            isDark={isDark} 
-          />
-          <ToolbarButton 
-            icon="crop-outline" 
-            label="Format" 
-            isActive={activeTool === 'format'} 
-            onPress={() => setActiveTool(activeTool === 'format' ? null : 'format')} 
-            activeColor={activeColor} 
-            isDark={isDark} 
-          />
-          <ToolbarButton 
-            icon="speedometer-outline" 
-            label="Speed" 
-            isActive={activeTool === 'speed'} 
-            onPress={() => setActiveTool(activeTool === 'speed' ? null : 'speed')} 
-            activeColor={activeColor} 
-            isDark={isDark} 
-          />
-          <ToolbarButton 
-            icon="color-palette-outline" 
-            label="Color" 
-            isActive={activeTool === 'color'} 
-            onPress={() => setActiveTool(activeTool === 'color' ? null : 'color')} 
-            activeColor={activeColor} 
-            isDark={isDark} 
-          />
-          <ToolbarButton 
-            icon="musical-notes-outline" 
-            label="Music" 
-            isActive={activeTool === 'music'} 
-            onPress={() => setActiveTool(activeTool === 'music' ? null : 'music')} 
-            activeColor={activeColor} 
-            isDark={isDark} 
-          />
+          <ToolbarButton icon="cut-outline" label="Trim"
+            isActive={activeTool === 'trim'} activeColor={activeColor} isDark={isDark}
+            onPress={() => setActiveTool(activeTool === 'trim' ? null : 'trim')} />
+          <ToolbarButton icon="scissors-outline" label="Split"
+            isActive={false} activeColor={activeColor} isDark={isDark}
+            onPress={handleSplitClip} />
+          <ToolbarButton icon="crop-outline" label="Format"
+            isActive={activeTool === 'format'} activeColor={activeColor} isDark={isDark}
+            onPress={() => setActiveTool(activeTool === 'format' ? null : 'format')} />
+          <ToolbarButton icon="speedometer-outline" label="Speed"
+            isActive={activeTool === 'speed'} activeColor={activeColor} isDark={isDark}
+            onPress={() => setActiveTool(activeTool === 'speed' ? null : 'speed')} />
+          <ToolbarButton icon="color-palette-outline" label="Color"
+            isActive={activeTool === 'color'} activeColor={activeColor} isDark={isDark}
+            onPress={() => setActiveTool(activeTool === 'color' ? null : 'color')} />
+          <ToolbarButton
+            icon="musical-notes-outline" label="Music"
+            isActive={activeTool === 'music'} activeColor={activeColor} isDark={isDark}
+            badge={!!musicUri}
+            onPress={() => setActiveTool(activeTool === 'music' ? null : 'music')} />
         </ScrollView>
       </View>
 
-      {/* Export Modal */}
-      <Modal visible={showExportModal} transparent={true} animationType="fade">
+      {/* ── Export Modal ── */}
+      <Modal visible={showExportModal} transparent animationType="slide">
         <View style={styles.modalOverlay}>
-          <View style={[styles.modalContent, { backgroundColor: isDark ? '#1F2937' : '#FFFFFF' }]}>
+          <View style={[styles.modalContent, { backgroundColor: isDark ? '#1A1F2E' : '#FFFFFF' }]}>
             <ThemedText style={styles.modalTitle}>Export Settings</ThemedText>
-            
+
             <ThemedText style={styles.modalSubtitle}>Resolution</ThemedText>
             <View style={styles.optionsRow}>
               {['Original', '1280x720', '1920x1080', '3840x2160'].map(res => (
-                <TouchableOpacity 
-                  key={res} 
-                  style={[styles.optionButton, exportResolution === res && { backgroundColor: activeColor }]} 
-                  onPress={() => setExportResolution(res)}>
+                <TouchableOpacity
+                  key={res}
+                  style={[styles.optionButton, exportResolution === res && { backgroundColor: activeColor }]}
+                  onPress={() => setExportResolution(res)}
+                >
                   <Text style={[styles.optionText, exportResolution === res && { color: '#FFF' }]}>
-                    {res === 'Original' ? res : res === '3840x2160' ? '4K' : res.split('x')[1] + 'p'}
+                    {res === 'Original' ? 'Auto' : res === '3840x2160' ? '4K' : res.split('x')[1] + 'p'}
                   </Text>
                 </TouchableOpacity>
               ))}
@@ -720,341 +755,199 @@ export default function EditorScreen() {
             <ThemedText style={styles.modalSubtitle}>Framerate</ThemedText>
             <View style={styles.optionsRow}>
               {['Original', '30', '60'].map(fps => (
-                <TouchableOpacity 
-                  key={fps} 
-                  style={[styles.optionButton, exportFps === fps && { backgroundColor: activeColor }]} 
-                  onPress={() => setExportFps(fps)}>
+                <TouchableOpacity
+                  key={fps}
+                  style={[styles.optionButton, exportFps === fps && { backgroundColor: activeColor }]}
+                  onPress={() => setExportFps(fps)}
+                >
                   <Text style={[styles.optionText, exportFps === fps && { color: '#FFF' }]}>
-                    {fps === 'Original' ? fps : `${fps} fps`}
+                    {fps === 'Original' ? 'Auto' : `${fps} fps`}
                   </Text>
                 </TouchableOpacity>
               ))}
             </View>
 
+            <View style={{ backgroundColor: isDark ? '#0F172A' : '#F1F5F9', borderRadius: 10, padding: 12, marginVertical: 8 }}>
+              <Text style={{ color: isDark ? '#94A3B8' : '#64748B', fontSize: 12 }}>
+                📽 {clipsData.length} clip{clipsData.length !== 1 ? 's' : ''} · {
+                  clipsData.reduce((sum, c) => sum + Math.max(0, c.trimEnd - c.trimStart), 0).toFixed(1)
+                }s total
+              </Text>
+            </View>
+
             <View style={styles.modalActions}>
               <TouchableOpacity style={styles.modalCancelButton} onPress={() => setShowExportModal(false)}>
-                <Text style={{ color: isDark ? '#FFF' : '#000' }}>Cancel</Text>
+                <Text style={{ color: isDark ? '#CBD5E1' : '#374151', fontWeight: '500' }}>Cancel</Text>
               </TouchableOpacity>
-              <TouchableOpacity style={[styles.modalExportButton, { backgroundColor: activeColor }]} onPress={executeExport}>
-                <Text style={{ color: '#FFF', fontWeight: 'bold' }}>Export Video</Text>
+              <TouchableOpacity
+                style={[styles.modalExportButton, { backgroundColor: activeColor }]}
+                onPress={executeExport}
+              >
+                <Text style={{ color: '#FFF', fontWeight: 'bold', fontSize: 15 }}>⬇ Export Video</Text>
               </TouchableOpacity>
             </View>
           </View>
         </View>
       </Modal>
+
     </ThemedView>
   );
 }
 
-function ToolbarButton({ icon, label, isActive, onPress, activeColor, isDark }: { icon: any, label: string, isActive: boolean, onPress: () => void, activeColor: string, isDark: boolean }) {
+// ─── ToolbarButton ────────────────────────────────────────────────────────────
+function ToolbarButton({
+  icon, label, isActive, onPress, activeColor, isDark, badge = false,
+}: {
+  icon: any; label: string; isActive: boolean; onPress: () => void;
+  activeColor: string; isDark: boolean; badge?: boolean;
+}) {
   return (
     <TouchableOpacity style={styles.toolbarButton} onPress={onPress}>
       <View style={[
-        styles.iconWrapper, 
+        styles.iconWrapper,
         { backgroundColor: isDark ? '#181A1F' : '#F3F4F6' },
-        isActive && { backgroundColor: isDark ? '#2D3748' : '#DBEAFE', borderColor: activeColor, borderWidth: 1 }
+        isActive && { backgroundColor: isDark ? '#1E293B' : '#DBEAFE', borderColor: activeColor, borderWidth: 1.5 },
       ]}>
-        <Ionicons name={icon} size={24} color={isActive ? activeColor : (isDark ? '#FFF' : '#000')} />
+        <Ionicons name={icon} size={22} color={isActive ? activeColor : (isDark ? '#CBD5E1' : '#374151')} />
+        {badge && (
+          <View style={[styles.badgeDot, { backgroundColor: activeColor }]} />
+        )}
       </View>
       <ThemedText style={[styles.toolbarLabel, isActive && { color: activeColor }]}>{label}</ThemedText>
     </TouchableOpacity>
   );
 }
 
+// ─── Styles ────────────────────────────────────────────────────────────────────
 const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-  },
+  container: { flex: 1 },
+
+  // Header
   header: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    paddingHorizontal: 16,
-    paddingBottom: 16,
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
+    paddingHorizontal: 14, paddingBottom: 10,
   },
-  headerTitle: {
-    fontSize: 20,
-    fontWeight: '600',
-  },
-  iconButton: {
-    padding: 8,
-  },
-  videoContainer: {
-    flex: 1,
-    backgroundColor: '#000',
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-  video: {
-    width: '100%',
-    height: '100%',
-  },
-  placeholderVideo: {
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: 12,
-  },
-  toolArea: {
-    minHeight: 140,
-    justifyContent: 'center',
-    paddingHorizontal: 16,
-    paddingVertical: 8,
-  },
-  controlsContainer: {
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  playButton: {
-    width: 64,
-    height: 64,
-    borderRadius: 32,
-    backgroundColor: '#3B82F6',
-    alignItems: 'center',
-    justifyContent: 'center',
-    shadowColor: '#3B82F6',
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.3,
-    shadowRadius: 8,
-    elevation: 4,
-  },
-  toolOptionsContainer: {
-    flex: 1,
-    justifyContent: 'center',
-    paddingVertical: 10,
-  },
-  toolTitle: {
-    fontSize: 16,
-    fontWeight: 'bold',
-    marginBottom: 12,
-    textAlign: 'center',
-  },
-  speedOptions: {
-    flexDirection: 'row',
-    justifyContent: 'center',
-    gap: 20,
-  },
-  speedButton: {
-    paddingVertical: 10,
-    paddingHorizontal: 20,
-    borderRadius: 20,
-    backgroundColor: '#333',
-  },
-  speedButtonText: {
-    color: '#AAA',
-    fontSize: 16,
-    fontWeight: 'bold',
-  },
-  sliderLabel: {
-    fontSize: 12,
-    marginTop: 8,
-  },
-  toolbarContainer: {
-    paddingTop: 12,
-    paddingBottom: 16,
-    borderTopWidth: 1,
-    borderTopColor: '#272A30',
-  },
-  toolbar: {
-    paddingHorizontal: 16,
-    gap: 20,
-  },
-  toolbarButton: {
-    alignItems: 'center',
-    gap: 8,
-  },
-  iconWrapper: {
-    width: 56,
-    height: 56,
-    borderRadius: 28,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  toolbarLabel: {
-    fontSize: 12,
-    fontWeight: '500',
-  },
-  modalOverlay: {
-    flex: 1,
-    backgroundColor: 'rgba(0, 0, 0, 0.6)',
-    justifyContent: 'center',
-    alignItems: 'center',
-    padding: 20,
-  },
-  modalContent: {
-    width: '100%',
-    borderRadius: 16,
-    padding: 24,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 10 },
-    shadowOpacity: 0.3,
-    shadowRadius: 20,
-    elevation: 10,
-  },
-  modalTitle: {
-    fontSize: 22,
-    fontWeight: 'bold',
-    marginBottom: 20,
-    textAlign: 'center',
-  },
-  modalSubtitle: {
-    fontSize: 16,
-    fontWeight: '600',
-    marginTop: 10,
-    marginBottom: 8,
-  },
-  optionsRow: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: 8,
-    marginBottom: 16,
-  },
-  optionButton: {
-    paddingVertical: 8,
-    paddingHorizontal: 16,
-    borderRadius: 20,
-    backgroundColor: '#4B5563',
-  },
-  optionText: {
-    color: '#D1D5DB',
-    fontSize: 14,
-    fontWeight: '500',
-  },
-  modalActions: {
-    flexDirection: 'row',
-    justifyContent: 'flex-end',
-    gap: 12,
-    marginTop: 20,
-  },
-  modalCancelButton: {
-    paddingVertical: 12,
-    paddingHorizontal: 20,
-    borderRadius: 8,
-    justifyContent: 'center',
-  },
-  modalExportButton: {
-    paddingVertical: 12,
-    paddingHorizontal: 24,
-    borderRadius: 8,
-    justifyContent: 'center',
-  },
-  button: {
-    paddingVertical: 12,
-    paddingHorizontal: 24,
-    borderRadius: 8,
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-  buttonText: {
-    color: '#FFF',
-    fontSize: 16,
-    fontWeight: 'bold',
-  },
-  timelineContainer: {
-    paddingHorizontal: 16,
-    paddingBottom: 12,
-    paddingTop: 4,
-  },
+  headerTitle: { fontSize: 18, fontWeight: '700', flex: 1, textAlign: 'center' },
+  iconButton: { padding: 8 },
+
+  // Video container
+  videoContainer: { flex: 1, backgroundColor: '#000', justifyContent: 'center', alignItems: 'center' },
+  placeholderVideo: { alignItems: 'center', justifyContent: 'center', gap: 12 },
+
+  // Timeline
+  timelineContainer: { paddingHorizontal: 12, paddingBottom: 10, paddingTop: 2 },
   timelineHeader: {
-    flexDirection: 'row',
-    alignItems: 'baseline',
-    justifyContent: 'space-between',
-    marginBottom: 8,
-    paddingHorizontal: 4,
+    flexDirection: 'row', alignItems: 'baseline', justifyContent: 'space-between',
+    marginBottom: 6, paddingHorizontal: 2,
   },
-  timelineTitle: {
-    fontSize: 12,
-    fontWeight: '700',
-    textTransform: 'uppercase',
-    letterSpacing: 1,
-    opacity: 0.9,
-  },
-  timelineSubtitle: {
-    fontSize: 10,
-    opacity: 0.5,
-  },
-  timelineList: {
-    gap: 8,
-    paddingRight: 16,
-    height: 76,
-  },
+  timelineTitle: { fontSize: 10, fontWeight: '800', letterSpacing: 1.5 },
+  timelineSubtitle: { fontSize: 9 },
+  timelineList: { gap: 5, paddingRight: 12, alignItems: 'center', height: TIMELINE_HEIGHT + 4 },
+
   timelineCard: {
-    width: 110,
-    height: 64,
-    borderRadius: 12,
-    backgroundColor: '#1E293B',
+    height: TIMELINE_HEIGHT,
+    borderRadius: 10,
+    backgroundColor: '#0F172A',
     borderWidth: 1.5,
-    borderColor: '#334155',
+    borderColor: '#1E293B',
     overflow: 'hidden',
     position: 'relative',
   },
-  cardThumbnail: {
-    width: '100%',
-    height: '100%',
-    position: 'absolute',
-    resizeMode: 'cover',
-  },
-  cardPlaceholder: {
-    width: '100%',
-    height: '100%',
-    position: 'absolute',
-    justifyContent: 'center',
-    alignItems: 'center',
-    backgroundColor: '#0F172A',
-  },
+  cardPlaceholder: { justifyContent: 'center', alignItems: 'center', backgroundColor: '#0F172A' },
   cardOverlay: {
     flex: 1,
-    backgroundColor: 'rgba(15, 23, 42, 0.45)',
-    padding: 6,
+    backgroundColor: 'rgba(2,6,23,0.52)',
+    padding: 5,
     justifyContent: 'space-between',
   },
-  cardHeaderRow: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-  },
+  cardHeaderRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
   cardIndexBadge: {
-    width: 18,
-    height: 18,
-    borderRadius: 9,
-    backgroundColor: '#475569',
-    justifyContent: 'center',
-    alignItems: 'center',
+    width: 17, height: 17, borderRadius: 8.5,
+    backgroundColor: '#334155', justifyContent: 'center', alignItems: 'center',
   },
-  cardIndexText: {
-    color: '#FFF',
-    fontSize: 10,
-    fontWeight: 'bold',
-  },
-  cardDeleteButton: {
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 1 },
-    shadowOpacity: 0.3,
-    shadowRadius: 1,
-    elevation: 2,
-  },
-  cardFooterRow: {
-    alignItems: 'flex-start',
-  },
+  cardIndexText: { color: '#FFF', fontSize: 9, fontWeight: '800' },
+  cardDeleteBtn: { opacity: 0.9 },
   cardDurationText: {
-    color: '#FFF',
-    fontSize: 10,
-    fontWeight: 'bold',
-    backgroundColor: 'rgba(0, 0, 0, 0.6)',
-    paddingVertical: 2,
-    paddingHorizontal: 6,
-    borderRadius: 6,
-    overflow: 'hidden',
+    color: '#FFF', fontSize: 9, fontWeight: '700',
+    backgroundColor: 'rgba(0,0,0,0.65)', paddingVertical: 2, paddingHorizontal: 5,
+    borderRadius: 4, overflow: 'hidden', alignSelf: 'flex-start',
+  },
+  cardNoAudioText: {
+    color: '#F59E0B', fontSize: 8, fontWeight: '600',
+    marginTop: 1, alignSelf: 'flex-start',
   },
   timelineAddCard: {
-    width: 76,
-    height: 64,
-    borderRadius: 12,
-    borderWidth: 1.5,
-    borderStyle: 'dashed',
-    borderColor: '#3B82F6',
-    justifyContent: 'center',
-    alignItems: 'center',
-    backgroundColor: 'rgba(59, 130, 246, 0.05)',
+    width: 56, height: TIMELINE_HEIGHT, borderRadius: 10,
+    borderWidth: 1.5, borderStyle: 'dashed', borderColor: '#3B82F6',
+    justifyContent: 'center', alignItems: 'center',
+    backgroundColor: 'rgba(59,130,246,0.06)',
   },
-});
 
+  // Tool area
+  toolArea: { height: 148, justifyContent: 'center', paddingHorizontal: 16, paddingVertical: 6 },
+  toolOptionsContainer: { flex: 1 },
+  toolTitle: { fontSize: 14, fontWeight: '700', marginBottom: 10, textAlign: 'center' },
+  sliderLabel: { fontSize: 11, marginTop: 4, color: '#94A3B8' },
+
+  controlsContainer: { alignItems: 'center', justifyContent: 'center' },
+  playButton: {
+    width: 60, height: 60, borderRadius: 30,
+    alignItems: 'center', justifyContent: 'center',
+    shadowOffset: { width: 0, height: 4 }, shadowOpacity: 0.35, shadowRadius: 8, elevation: 6,
+  },
+
+  // Speed
+  speedOptions: { flexDirection: 'row', justifyContent: 'center', gap: 8, flexWrap: 'wrap' },
+  speedButton: {
+    paddingVertical: 8, paddingHorizontal: 14, borderRadius: 20, backgroundColor: '#1E293B',
+  },
+  speedButtonText: { color: '#94A3B8', fontSize: 14, fontWeight: '700' },
+
+  // Aspect ratio
+  ratioBtn: { paddingVertical: 8, paddingHorizontal: 16, borderRadius: 20, backgroundColor: '#1E293B' },
+  ratioBtnText: { color: '#94A3B8', fontWeight: '700', fontSize: 13 },
+
+  // Music
+  musicPickBtn: {
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'center',
+    gap: 8, paddingVertical: 10, paddingHorizontal: 18, borderRadius: 14,
+  },
+  musicPickBtnText: { color: '#FFF', fontSize: 14, fontWeight: '700' },
+  musicFileName: { color: '#94A3B8', fontSize: 11, marginTop: 8, textAlign: 'center' },
+  volLabel: { fontSize: 11, color: '#94A3B8', marginTop: 8 },
+
+  // Toolbar
+  toolbarContainer: { paddingTop: 10, borderTopWidth: 1, borderTopColor: '#1E293B' },
+  toolbar: { paddingHorizontal: 16, gap: 18 },
+  toolbarButton: { alignItems: 'center', gap: 5 },
+  iconWrapper: {
+    width: 50, height: 50, borderRadius: 25,
+    alignItems: 'center', justifyContent: 'center', position: 'relative',
+  },
+  toolbarLabel: { fontSize: 10, fontWeight: '600', color: '#64748B' },
+  badgeDot: {
+    width: 8, height: 8, borderRadius: 4,
+    position: 'absolute', top: 4, right: 4,
+    borderWidth: 1.5, borderColor: '#0F172A',
+  },
+
+  // Export modal
+  modalOverlay: {
+    flex: 1, backgroundColor: 'rgba(0,0,0,0.75)',
+    justifyContent: 'flex-end',
+  },
+  modalContent: {
+    borderTopLeftRadius: 24, borderTopRightRadius: 24,
+    padding: 24, paddingBottom: 36,
+    shadowColor: '#000', shadowOffset: { width: 0, height: -4 },
+    shadowOpacity: 0.3, shadowRadius: 20, elevation: 20,
+  },
+  modalTitle: { fontSize: 20, fontWeight: '800', marginBottom: 18, textAlign: 'center' },
+  modalSubtitle: { fontSize: 13, fontWeight: '700', marginTop: 10, marginBottom: 8, opacity: 0.7 },
+  optionsRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 8, marginBottom: 6 },
+  optionButton: { paddingVertical: 8, paddingHorizontal: 16, borderRadius: 20, backgroundColor: '#1E293B' },
+  optionText: { color: '#94A3B8', fontSize: 13, fontWeight: '600' },
+  modalActions: { flexDirection: 'row', justifyContent: 'flex-end', gap: 12, marginTop: 16 },
+  modalCancelButton: { paddingVertical: 12, paddingHorizontal: 18, borderRadius: 10, justifyContent: 'center' },
+  modalExportButton: { paddingVertical: 12, paddingHorizontal: 24, borderRadius: 10, justifyContent: 'center' },
+});
