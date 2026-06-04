@@ -17,12 +17,11 @@ import * as MediaLibrary from 'expo-media-library';
 import * as DocumentPicker from 'expo-document-picker';
 import * as ImagePicker from 'expo-image-picker';
 import DraggableFlatList, { ScaleDecorator } from 'react-native-draggable-flatlist';
-import { processVideo, getVideoMetadata, generateThumbnails, ClipInput } from '@/utils/ffmpeg';
+import { processVideo, getVideoMetadata, generateThumbnails, ClipInput, FFmpegResult } from '@/utils/ffmpeg';
 import { RangeSlider } from '@/components/ui/RangeSlider';
 import { TransformCanvas, TransformState } from '@/components/ui/TransformCanvas';
 import { saveProject, getProject, Project } from '@/utils/storage';
 
-// ─── Types ────────────────────────────────────────────────────────────────────
 type Tool = 'trim' | 'speed' | 'color' | 'format' | 'music' | null;
 
 interface ClipData {
@@ -36,13 +35,22 @@ interface ClipData {
   hasAudio: boolean;
 }
 
-// ─── Constants ────────────────────────────────────────────────────────────────
+interface EditorSnapshot {
+  clipsData: ClipData[];
+  activeClipIndex: number;
+  speed: number;
+  brightness: number;
+  contrast: number;
+  saturation: number;
+  aspectRatio: string;
+}
+
 const TIMELINE_HEIGHT = 80;
 const THUMB_CARD_MIN_W = 72;
 const THUMB_CARD_MAX_W = 260;
-const PIXELS_PER_SECOND = 18; // proportional width factor
+const PIXELS_PER_SECOND = 18;
+const MAX_UNDO_HISTORY = 20;
 
-// ─── Main Component ───────────────────────────────────────────────────────────
 export default function EditorScreen() {
   const { projectId, uris: urisParam } = useLocalSearchParams<{ projectId?: string; uris?: string }>();
   const colorScheme = useColorScheme();
@@ -67,35 +75,87 @@ export default function EditorScreen() {
   const [isPlaying, setIsPlaying] = useState(true);
   const [activeTool, setActiveTool] = useState<Tool>(null);
   const [isExporting, setIsExporting] = useState(false);
+  const [exportProgress, setExportProgress] = useState<number>(0);
   const [showExportModal, setShowExportModal] = useState(false);
 
-  // Global edit states (applied to all clips on export)
   const [speed, setSpeed] = useState<number>(1.0);
   const [brightness, setBrightness] = useState<number>(0);
   const [contrast, setContrast] = useState<number>(1.0);
   const [saturation, setSaturation] = useState<number>(1.0);
 
-  // Music & Volume states
   const [musicUri, setMusicUri] = useState<string | null>(null);
   const [musicName, setMusicName] = useState<string | null>(null);
   const [videoVolume, setVideoVolume] = useState<number>(1.0);
   const [musicVolume, setMusicVolume] = useState<number>(0.5);
 
-  // Transform states
   const [aspectRatio, setAspectRatio] = useState<string>('Original');
   const [transform, setTransform] = useState<TransformState>({ scale: 1, translateX: 0, translateY: 0, rotation: 0 });
   const [resetTrigger, setResetTrigger] = useState<number>(0);
 
-  // Export settings
   const [exportResolution, setExportResolution] = useState<string>('Original');
   const [exportFps, setExportFps] = useState<string>('Original');
 
-  // Trim label refs – updated directly during drag without setState to avoid re-renders
+  // Undo/Redo history
+  const [undoStack, setUndoStack] = useState<EditorSnapshot[]>([]);
+  const [redoStack, setRedoStack] = useState<EditorSnapshot[]>([]);
+
   const trimLabelStartRef = useRef<Text | null>(null);
   const trimLabelEndRef = useRef<Text | null>(null);
   const fmt = (s: number) => `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, '0')}`;
 
-  // ─── Load project ────────────────────────────────────────────────────────────
+  // Snapshot for undo
+  const takeSnapshot = useCallback(() => {
+    const snapshot: EditorSnapshot = {
+      clipsData: JSON.parse(JSON.stringify(clipsData)),
+      activeClipIndex,
+      speed, brightness, contrast, saturation, aspectRatio,
+    };
+    setUndoStack(prev => {
+      const next = [...prev, snapshot];
+      return next.length > MAX_UNDO_HISTORY ? next.slice(-MAX_UNDO_HISTORY) : next;
+    });
+    setRedoStack([]);
+  }, [clipsData, activeClipIndex, speed, brightness, contrast, saturation, aspectRatio]);
+
+  const undo = useCallback(() => {
+    if (undoStack.length === 0) return;
+    const current: EditorSnapshot = {
+      clipsData: JSON.parse(JSON.stringify(clipsData)),
+      activeClipIndex,
+      speed, brightness, contrast, saturation, aspectRatio,
+    };
+    setRedoStack(prev => [...prev, current]);
+    const prev = undoStack[undoStack.length - 1];
+    setUndoStack(s => s.slice(0, -1));
+    setClipsData(prev.clipsData);
+    setActiveClipIndex(prev.activeClipIndex);
+    setSpeed(prev.speed);
+    setBrightness(prev.brightness);
+    setContrast(prev.contrast);
+    setSaturation(prev.saturation);
+    setAspectRatio(prev.aspectRatio);
+  }, [undoStack, clipsData, activeClipIndex, speed, brightness, contrast, saturation, aspectRatio]);
+
+  const redo = useCallback(() => {
+    if (redoStack.length === 0) return;
+    const current: EditorSnapshot = {
+      clipsData: JSON.parse(JSON.stringify(clipsData)),
+      activeClipIndex,
+      speed, brightness, contrast, saturation, aspectRatio,
+    };
+    setUndoStack(prev => [...prev, current]);
+    const next = redoStack[redoStack.length - 1];
+    setRedoStack(s => s.slice(0, -1));
+    setClipsData(next.clipsData);
+    setActiveClipIndex(next.activeClipIndex);
+    setSpeed(next.speed);
+    setBrightness(next.brightness);
+    setContrast(next.contrast);
+    setSaturation(next.saturation);
+    setAspectRatio(next.aspectRatio);
+  }, [redoStack, clipsData, activeClipIndex, speed, brightness, contrast, saturation, aspectRatio]);
+
+  // Load project
   useEffect(() => {
     if (projectId) {
       getProject(projectId).then(proj => {
@@ -127,7 +187,7 @@ export default function EditorScreen() {
     }
   }, [projectId, urisParam]);
 
-  // ─── Auto-save (debounced 1s) ────────────────────────────────────────────────
+  // Auto-save (debounced 1s)
   useEffect(() => {
     if (isProjectLoading || clipsData.length === 0) return;
     const timeout = setTimeout(() => {
@@ -148,7 +208,7 @@ export default function EditorScreen() {
   }, [clipsData, speed, brightness, contrast, saturation, aspectRatio,
     musicUri, musicName, videoVolume, musicVolume, currentProjectId, projectName, isProjectLoading]);
 
-  // ─── Load metadata for new clips ─────────────────────────────────────────────
+  // Load metadata for new clips
   useEffect(() => {
     clipsData.forEach((clip, index) => {
       if (clip.duration === 0) {
@@ -174,7 +234,7 @@ export default function EditorScreen() {
     });
   }, [clipsData]);
 
-  // ─── Load thumbnails for active clip only ────────────────────────────────────
+  // Load thumbnails for active clip only
   useEffect(() => {
     if (!activeClip || activeClip.duration === 0 || activeClip.thumbnails.length > 0) return;
     generateThumbnails(activeClip.uri, activeClip.duration, 10).then(thumbs => {
@@ -184,10 +244,9 @@ export default function EditorScreen() {
     });
   }, [activeClipIndex, activeClip?.duration, activeClip?.thumbnails.length, activeClip?.uri]);
 
-  // ─── Playback loop respecting trim boundaries ─────────────────────────────────
+  // Playback loop respecting trim boundaries
   useEffect(() => {
     if (!activeClip || !player || activeClip.duration === 0) return;
-    // Seek to start of trimmed region when switching clips
     if (player.currentTime < activeClip.trimStart || player.currentTime > activeClip.trimEnd) {
       player.currentTime = activeClip.trimStart;
     }
@@ -205,14 +264,13 @@ export default function EditorScreen() {
     return () => clearInterval(interval);
   }, [activeClip?.uri, activeClip?.trimStart, activeClip?.trimEnd, isPlaying, player]);
 
-  // ─── Sync speed to player ────────────────────────────────────────────────────
+  // Sync speed to player
   useEffect(() => {
     if (player) player.playbackRate = speed;
   }, [speed, player]);
 
   const activeColor = isDark ? Colors.dark.tint : Colors.light.tint;
 
-  // ─── Handlers ────────────────────────────────────────────────────────────────
   const togglePlayPause = useCallback(() => {
     if (isPlaying) { player.pause(); } else { player.play(); }
     setIsPlaying(p => !p);
@@ -223,6 +281,7 @@ export default function EditorScreen() {
       Alert.alert('Cannot delete', 'You must have at least one video clip in your project.');
       return;
     }
+    takeSnapshot();
     Alert.alert('Delete Clip', `Delete Clip ${index + 1}?`, [
       { text: 'Cancel', style: 'cancel' },
       {
@@ -234,7 +293,7 @@ export default function EditorScreen() {
         }),
       },
     ]);
-  }, [clipsData.length, activeClipIndex]);
+  }, [clipsData.length, activeClipIndex, takeSnapshot]);
 
   const handleSplitClip = useCallback(() => {
     if (!activeClip || activeClip.duration === 0) return;
@@ -244,18 +303,19 @@ export default function EditorScreen() {
       Alert.alert('Cannot Split', 'The split point must be at least 0.5s away from the start/end.');
       return;
     }
+    takeSnapshot();
     const clipA: ClipData = { ...activeClip, trimEnd: currentTime };
-    const clipB: ClipData = { ...activeClip, trimStart: currentTime, thumbnails: [...activeClip.thumbnails] };
+    const clipB: ClipData = { ...activeClip, trimStart: currentTime, thumbnails: [] };
     setClipsData(prev => {
       const next = [...prev];
       next.splice(activeClipIndex, 1, clipA, clipB);
       return next;
     });
     setTimeout(() => setActiveClipIndex(activeClipIndex + 1), 100);
-    Alert.alert('Clip Split ✂️', 'The clip has been split into two parts!');
-  }, [activeClip, player, activeClipIndex]);
+  }, [activeClip, player, activeClipIndex, takeSnapshot]);
 
   const handleAddClip = useCallback(async () => {
+    takeSnapshot();
     const result = await ImagePicker.launchImageLibraryAsync({
       mediaTypes: ['videos'],
       allowsEditing: false,
@@ -269,7 +329,7 @@ export default function EditorScreen() {
       }));
       setClipsData(prev => [...prev, ...newClips]);
     }
-  }, []);
+  }, [takeSnapshot]);
 
   const executeExport = async () => {
     if (clipsData.length === 0) return;
@@ -281,6 +341,7 @@ export default function EditorScreen() {
     }
     try {
       setIsExporting(true);
+      setExportProgress(0);
       const outputUri = `${Paths.cache.uri}output_${Date.now()}.mp4`;
       const clipInputs: ClipInput[] = clipsData.map(c => ({
         uri: c.uri,
@@ -290,10 +351,12 @@ export default function EditorScreen() {
           ? { trim: { start: c.trimStart, end: c.trimEnd } }
           : {}),
       }));
+
+      const totalDuration = clipsData.reduce((sum, c) => sum + Math.max(0, c.trimEnd - c.trimStart), 0);
+
       const options: any = {
         speed,
         color: { brightness, contrast, saturation },
-        // Spread transform so canvasWidth/canvasHeight are included (avoids NaN in FFmpeg)
         transform: { ...transform, targetRatio: aspectRatio },
         videoVolume,
         musicVolume,
@@ -302,22 +365,25 @@ export default function EditorScreen() {
       if (exportResolution !== 'Original') options.resolution = exportResolution;
       if (exportFps !== 'Original') options.fps = parseInt(exportFps, 10);
 
-      const success = await processVideo(clipInputs, outputUri, options);
-      if (success) {
+      const result: FFmpegResult = await processVideo(clipInputs, outputUri, options, (progress) => {
+        setExportProgress(progress.percent);
+      });
+
+      if (result.success) {
         await MediaLibrary.saveToLibraryAsync(outputUri);
-        Alert.alert('✅ Exported!', 'Video saved to your gallery!');
+        Alert.alert('Exported!', 'Video saved to your gallery!');
       } else {
-        Alert.alert('Export Failed', 'FFmpeg could not process the video. Check the logs for details.');
+        Alert.alert('Export Failed', result.error || 'FFmpeg could not process the video.');
       }
     } catch (error) {
       console.error(error);
       Alert.alert('Error', 'An unexpected error occurred during export.');
     } finally {
       setIsExporting(false);
+      setExportProgress(0);
     }
   };
 
-  // ─── Tool Panel Renderer ──────────────────────────────────────────────────────
   const renderToolOptions = () => {
     if (activeTool === 'speed') {
       return (
@@ -328,7 +394,7 @@ export default function EditorScreen() {
               <TouchableOpacity
                 key={s}
                 style={[styles.speedButton, speed === s && { backgroundColor: activeColor }]}
-                onPress={() => setSpeed(s)}
+                onPress={() => { takeSnapshot(); setSpeed(s); }}
               >
                 <Text style={[styles.speedButtonText, speed === s && { color: '#FFF' }]}>{s}x</Text>
               </TouchableOpacity>
@@ -348,6 +414,7 @@ export default function EditorScreen() {
             style={{ width: '100%', height: 36 }}
             minimumValue={-1} maximumValue={1} value={brightness}
             onValueChange={setBrightness}
+            onSlidingComplete={() => takeSnapshot()}
             minimumTrackTintColor={activeColor}
             maximumTrackTintColor={isDark ? '#333' : '#ddd'}
             thumbTintColor={activeColor}
@@ -358,6 +425,7 @@ export default function EditorScreen() {
             style={{ width: '100%', height: 36 }}
             minimumValue={0} maximumValue={2} value={contrast}
             onValueChange={setContrast}
+            onSlidingComplete={() => takeSnapshot()}
             minimumTrackTintColor={activeColor}
             maximumTrackTintColor={isDark ? '#333' : '#ddd'}
             thumbTintColor={activeColor}
@@ -368,6 +436,7 @@ export default function EditorScreen() {
             style={{ width: '100%', height: 36 }}
             minimumValue={0} maximumValue={3} value={saturation}
             onValueChange={setSaturation}
+            onSlidingComplete={() => takeSnapshot()}
             minimumTrackTintColor={activeColor}
             maximumTrackTintColor={isDark ? '#333' : '#ddd'}
             thumbTintColor={activeColor}
@@ -383,7 +452,6 @@ export default function EditorScreen() {
           {activeClip && activeClip.duration > 0 ? (
             <View style={{ width: '100%', paddingHorizontal: 10 }}>
               <View style={{ flexDirection: 'row', justifyContent: 'space-between', marginBottom: 8 }}>
-                {/* Refs let us update text without triggering full re-render during drag */}
                 <Text
                   ref={trimLabelStartRef}
                   style={[styles.sliderLabel, { color: isDark ? '#AAA' : '#555' }]}
@@ -404,13 +472,12 @@ export default function EditorScreen() {
                 initialLow={activeClip.trimStart}
                 initialHigh={activeClip.trimEnd}
                 onValuesChanging={(low, high) => {
-                  // Ultra-light: only update player position and ref labels during drag
                   if (player) player.currentTime = low;
                   trimLabelStartRef.current?.setNativeProps({ text: `Start: ${fmt(low)}` });
                   trimLabelEndRef.current?.setNativeProps({ text: `End: ${fmt(high)}` });
                 }}
                 onValueChanged={(low, high) => {
-                  // Only commit to state on release — no heavy re-renders during drag
+                  takeSnapshot();
                   setClipsData(prev => prev.map((c, i) =>
                     i === activeClipIndex ? { ...c, trimStart: low, trimEnd: high } : c
                   ));
@@ -445,7 +512,7 @@ export default function EditorScreen() {
               <TouchableOpacity
                 key={r}
                 style={[styles.ratioBtn, aspectRatio === r && { backgroundColor: activeColor }]}
-                onPress={() => setAspectRatio(r)}
+                onPress={() => { takeSnapshot(); setAspectRatio(r); }}
               >
                 <Text style={[styles.ratioBtnText, aspectRatio === r && { color: '#FFF' }]}>{r}</Text>
               </TouchableOpacity>
@@ -460,6 +527,7 @@ export default function EditorScreen() {
         try {
           const result = await DocumentPicker.getDocumentAsync({ type: 'audio/*', copyToCacheDirectory: true });
           if (!result.canceled && result.assets?.length > 0) {
+            takeSnapshot();
             setMusicUri(result.assets[0].uri);
             setMusicName(result.assets[0].name);
           }
@@ -472,7 +540,7 @@ export default function EditorScreen() {
             <ThemedText style={styles.toolTitle}>Background Music</ThemedText>
             {musicUri && (
               <TouchableOpacity
-                onPress={() => { setMusicUri(null); setMusicName(null); }}
+                onPress={() => { takeSnapshot(); setMusicUri(null); setMusicName(null); }}
                 style={{ padding: 6, backgroundColor: '#3A1215', borderRadius: 8, flexDirection: 'row', alignItems: 'center', gap: 4 }}
               >
                 <Ionicons name="trash-outline" size={14} color="#EF4444" />
@@ -490,7 +558,7 @@ export default function EditorScreen() {
           </TouchableOpacity>
 
           {musicName && (
-            <Text style={styles.musicFileName} numberOfLines={1}>🎵 {musicName}</Text>
+            <Text style={styles.musicFileName} numberOfLines={1}>{musicName}</Text>
           )}
 
           <View style={{ marginTop: 16 }}>
@@ -499,6 +567,7 @@ export default function EditorScreen() {
               style={{ width: '100%', height: 36 }}
               minimumValue={0} maximumValue={1} value={videoVolume}
               onValueChange={setVideoVolume}
+              onSlidingComplete={() => takeSnapshot()}
               minimumTrackTintColor={activeColor}
               maximumTrackTintColor={isDark ? '#333' : '#ddd'}
               thumbTintColor={activeColor}
@@ -509,6 +578,7 @@ export default function EditorScreen() {
                 style={{ width: '100%', height: 36 }}
                 minimumValue={0} maximumValue={1} value={musicVolume}
                 onValueChange={setMusicVolume}
+                onSlidingComplete={() => takeSnapshot()}
                 minimumTrackTintColor='#A855F7'
                 maximumTrackTintColor={isDark ? '#333' : '#ddd'}
                 thumbTintColor='#A855F7'
@@ -519,20 +589,18 @@ export default function EditorScreen() {
       );
     }
 
-    // Default: play/pause
     return (
       <View style={styles.controlsContainer}>
         <TouchableOpacity onPress={togglePlayPause} style={[styles.playButton, { backgroundColor: activeColor }]}>
           <Ionicons name={isPlaying ? 'pause' : 'play'} size={30} color="#FFF" />
         </TouchableOpacity>
         {activeClip?.hasAudio === false && (
-          <Text style={{ color: '#F59E0B', fontSize: 11, marginTop: 6 }}>⚠️ No audio track</Text>
+          <Text style={{ color: '#F59E0B', fontSize: 11, marginTop: 6 }}>No audio track</Text>
         )}
       </View>
     );
   };
 
-  // ─── Loading State ────────────────────────────────────────────────────────────
   if (isProjectLoading) {
     return (
       <ThemedView style={[styles.container, { justifyContent: 'center', alignItems: 'center' }]}>
@@ -541,17 +609,30 @@ export default function EditorScreen() {
     );
   }
 
-  // ─── Main Render ──────────────────────────────────────────────────────────────
   return (
     <ThemedView style={styles.container}>
 
-      {/* ── Header ── */}
+      {/* Header */}
       <View style={[styles.header, { paddingTop: insets.top + 8 }]}>
         <TouchableOpacity onPress={() => router.back()} style={styles.iconButton} disabled={isExporting}>
           <Ionicons name="chevron-back" size={26} color={isDark ? Colors.dark.text : Colors.light.text} />
         </TouchableOpacity>
         <ThemedText style={styles.headerTitle} numberOfLines={1}>{projectName}</ThemedText>
         <View style={{ flexDirection: 'row', gap: 4 }}>
+          <TouchableOpacity
+            style={[styles.iconButton, undoStack.length === 0 && { opacity: 0.3 }]}
+            onPress={undo}
+            disabled={undoStack.length === 0 || isExporting}
+          >
+            <Ionicons name="arrow-undo-outline" size={22} color={isDark ? Colors.dark.text : Colors.light.text} />
+          </TouchableOpacity>
+          <TouchableOpacity
+            style={[styles.iconButton, redoStack.length === 0 && { opacity: 0.3 }]}
+            onPress={redo}
+            disabled={redoStack.length === 0 || isExporting}
+          >
+            <Ionicons name="arrow-redo-outline" size={22} color={isDark ? Colors.dark.text : Colors.light.text} />
+          </TouchableOpacity>
           <TouchableOpacity style={styles.iconButton} onPress={handleAddClip} disabled={isExporting}>
             <Ionicons name="add-circle-outline" size={26} color={isDark ? Colors.dark.text : Colors.light.text} />
           </TouchableOpacity>
@@ -564,11 +645,11 @@ export default function EditorScreen() {
         </View>
       </View>
 
-      {/* ── Timeline (Filmstrip) ── */}
+      {/* Timeline */}
       <View style={styles.timelineContainer}>
         <View style={styles.timelineHeader}>
           <Text style={[styles.timelineTitle, { color: isDark ? '#94A3B8' : '#64748B' }]}>TIMELINE</Text>
-          <Text style={[styles.timelineSubtitle, { color: isDark ? '#475569' : '#94A3B8' }]}>Hold to reorder · Tap to select</Text>
+          <Text style={[styles.timelineSubtitle, { color: isDark ? '#475569' : '#94A3B8' }]}>Hold to reorder - Tap to select</Text>
         </View>
 
         <DraggableFlatList
@@ -576,6 +657,7 @@ export default function EditorScreen() {
           data={clipsData}
           onDragEnd={({ data }) => {
             const currentUri = clipsData[activeClipIndex]?.uri;
+            takeSnapshot();
             setClipsData(data);
             const newIndex = data.findIndex(c => c.uri === currentUri);
             if (newIndex !== -1) setActiveClipIndex(newIndex);
@@ -587,7 +669,6 @@ export default function EditorScreen() {
             const i = getIndex() ?? 0;
             const isSelected = i === activeClipIndex;
             const activeDuration = item.duration > 0 ? (item.trimEnd - item.trimStart) : 0;
-            // Proportional width: clamp between min and max
             const cardW = item.duration > 0
               ? Math.max(THUMB_CARD_MIN_W, Math.min(THUMB_CARD_MAX_W, Math.round(activeDuration * PIXELS_PER_SECOND)))
               : THUMB_CARD_MIN_W;
@@ -610,7 +691,6 @@ export default function EditorScreen() {
                   ]}
                   activeOpacity={0.85}
                 >
-                  {/* Filmstrip: multiple thumbnails side by side */}
                   {item.thumbnails.length > 0 ? (
                     <View style={[StyleSheet.absoluteFillObject, { flexDirection: 'row' }]}>
                       {item.thumbnails.slice(0, Math.ceil(cardW / 40)).map((t, ti) => (
@@ -631,9 +711,7 @@ export default function EditorScreen() {
                     </View>
                   )}
 
-                  {/* Dark gradient overlay */}
                   <View style={[StyleSheet.absoluteFillObject, styles.cardOverlay]}>
-                    {/* Top row: index badge + delete */}
                     <View style={styles.cardHeaderRow}>
                       <View style={[styles.cardIndexBadge, isSelected && { backgroundColor: activeColor }]}>
                         <Text style={styles.cardIndexText}>{i + 1}</Text>
@@ -647,10 +725,9 @@ export default function EditorScreen() {
                       </TouchableOpacity>
                     </View>
 
-                    {/* Bottom row: duration */}
                     <View>
                       <Text style={styles.cardDurationText}>
-                        {activeDuration > 0 ? `${activeDuration.toFixed(1)}s` : '…'}
+                        {activeDuration > 0 ? `${activeDuration.toFixed(1)}s` : '...'}
                       </Text>
                       {item.hasAudio === false && (
                         <Text style={styles.cardNoAudioText}>silent</Text>
@@ -658,7 +735,6 @@ export default function EditorScreen() {
                     </View>
                   </View>
 
-                  {/* Active selection glow */}
                   {isSelected && (
                     <View style={[StyleSheet.absoluteFillObject, {
                       borderRadius: 10,
@@ -680,7 +756,7 @@ export default function EditorScreen() {
         />
       </View>
 
-      {/* ── Video Preview ── */}
+      {/* Video Preview */}
       <View style={styles.videoContainer}>
         {uri ? (
           <TransformCanvas
@@ -700,12 +776,12 @@ export default function EditorScreen() {
         )}
       </View>
 
-      {/* ── Tool Panel ── */}
+      {/* Tool Panel */}
       <View style={styles.toolArea}>
         {renderToolOptions()}
       </View>
 
-      {/* ── Toolbar ── */}
+      {/* Toolbar */}
       <View style={[styles.toolbarContainer, { paddingBottom: Math.max(insets.bottom, 14) }]}>
         <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.toolbar}>
           <ToolbarButton icon="cut-outline" label="Trim"
@@ -731,7 +807,7 @@ export default function EditorScreen() {
         </ScrollView>
       </View>
 
-      {/* ── Export Modal ── */}
+      {/* Export Modal */}
       <Modal visible={showExportModal} transparent animationType="slide">
         <View style={styles.modalOverlay}>
           <View style={[styles.modalContent, { backgroundColor: isDark ? '#1A1F2E' : '#FFFFFF' }]}>
@@ -769,7 +845,7 @@ export default function EditorScreen() {
 
             <View style={{ backgroundColor: isDark ? '#0F172A' : '#F1F5F9', borderRadius: 10, padding: 12, marginVertical: 8 }}>
               <Text style={{ color: isDark ? '#94A3B8' : '#64748B', fontSize: 12 }}>
-                📽 {clipsData.length} clip{clipsData.length !== 1 ? 's' : ''} · {
+                {clipsData.length} clip{clipsData.length !== 1 ? 's' : ''} - {
                   clipsData.reduce((sum, c) => sum + Math.max(0, c.trimEnd - c.trimStart), 0).toFixed(1)
                 }s total
               </Text>
@@ -783,8 +859,24 @@ export default function EditorScreen() {
                 style={[styles.modalExportButton, { backgroundColor: activeColor }]}
                 onPress={executeExport}
               >
-                <Text style={{ color: '#FFF', fontWeight: 'bold', fontSize: 15 }}>⬇ Export Video</Text>
+                <Text style={{ color: '#FFF', fontWeight: 'bold', fontSize: 15 }}>Export Video</Text>
               </TouchableOpacity>
+            </View>
+          </View>
+        </View>
+      </Modal>
+
+      {/* Export Progress Modal */}
+      <Modal visible={isExporting} transparent animationType="fade">
+        <View style={styles.modalOverlay}>
+          <View style={[styles.modalContent, { backgroundColor: isDark ? '#1A1F2E' : '#FFFFFF', alignItems: 'center' }]}>
+            <ActivityIndicator size="large" color={activeColor} />
+            <ThemedText style={[styles.modalTitle, { marginTop: 16 }]}>Exporting Video...</ThemedText>
+            <Text style={{ color: isDark ? '#94A3B8' : '#64748B', fontSize: 13, marginTop: 8 }}>
+              {exportProgress > 0 ? `${Math.round(exportProgress)}%` : 'Preparing...'}
+            </Text>
+            <View style={styles.progressBarBg}>
+              <View style={[styles.progressBarFill, { width: `${Math.max(1, exportProgress)}%`, backgroundColor: activeColor }]} />
             </View>
           </View>
         </View>
@@ -794,7 +886,6 @@ export default function EditorScreen() {
   );
 }
 
-// ─── ToolbarButton ────────────────────────────────────────────────────────────
 function ToolbarButton({
   icon, label, isActive, onPress, activeColor, isDark, badge = false,
 }: {
@@ -818,11 +909,9 @@ function ToolbarButton({
   );
 }
 
-// ─── Styles ────────────────────────────────────────────────────────────────────
 const styles = StyleSheet.create({
   container: { flex: 1 },
 
-  // Header
   header: {
     flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
     paddingHorizontal: 14, paddingBottom: 10,
@@ -830,11 +919,9 @@ const styles = StyleSheet.create({
   headerTitle: { fontSize: 18, fontWeight: '700', flex: 1, textAlign: 'center' },
   iconButton: { padding: 8 },
 
-  // Video container
   videoContainer: { flex: 1, backgroundColor: '#000', justifyContent: 'center', alignItems: 'center' },
   placeholderVideo: { alignItems: 'center', justifyContent: 'center', gap: 12 },
 
-  // Timeline
   timelineContainer: { paddingHorizontal: 12, paddingBottom: 10, paddingTop: 2 },
   timelineHeader: {
     flexDirection: 'row', alignItems: 'baseline', justifyContent: 'space-between',
@@ -883,7 +970,6 @@ const styles = StyleSheet.create({
     backgroundColor: 'rgba(59,130,246,0.06)',
   },
 
-  // Tool area
   toolArea: { height: 148, justifyContent: 'center', paddingHorizontal: 16, paddingVertical: 6 },
   toolOptionsContainer: { flex: 1 },
   toolTitle: { fontSize: 14, fontWeight: '700', marginBottom: 10, textAlign: 'center' },
@@ -896,18 +982,15 @@ const styles = StyleSheet.create({
     shadowOffset: { width: 0, height: 4 }, shadowOpacity: 0.35, shadowRadius: 8, elevation: 6,
   },
 
-  // Speed
   speedOptions: { flexDirection: 'row', justifyContent: 'center', gap: 8, flexWrap: 'wrap' },
   speedButton: {
     paddingVertical: 8, paddingHorizontal: 14, borderRadius: 20, backgroundColor: '#1E293B',
   },
   speedButtonText: { color: '#94A3B8', fontSize: 14, fontWeight: '700' },
 
-  // Aspect ratio
   ratioBtn: { paddingVertical: 8, paddingHorizontal: 16, borderRadius: 20, backgroundColor: '#1E293B' },
   ratioBtnText: { color: '#94A3B8', fontWeight: '700', fontSize: 13 },
 
-  // Music
   musicPickBtn: {
     flexDirection: 'row', alignItems: 'center', justifyContent: 'center',
     gap: 8, paddingVertical: 10, paddingHorizontal: 18, borderRadius: 14,
@@ -916,7 +999,6 @@ const styles = StyleSheet.create({
   musicFileName: { color: '#94A3B8', fontSize: 11, marginTop: 8, textAlign: 'center' },
   volLabel: { fontSize: 11, color: '#94A3B8', marginTop: 8 },
 
-  // Toolbar
   toolbarContainer: { paddingTop: 10, borderTopWidth: 1, borderTopColor: '#1E293B' },
   toolbar: { paddingHorizontal: 16, gap: 18 },
   toolbarButton: { alignItems: 'center', gap: 5 },
@@ -931,7 +1013,6 @@ const styles = StyleSheet.create({
     borderWidth: 1.5, borderColor: '#0F172A',
   },
 
-  // Export modal
   modalOverlay: {
     flex: 1, backgroundColor: 'rgba(0,0,0,0.75)',
     justifyContent: 'flex-end',
@@ -950,4 +1031,12 @@ const styles = StyleSheet.create({
   modalActions: { flexDirection: 'row', justifyContent: 'flex-end', gap: 12, marginTop: 16 },
   modalCancelButton: { paddingVertical: 12, paddingHorizontal: 18, borderRadius: 10, justifyContent: 'center' },
   modalExportButton: { paddingVertical: 12, paddingHorizontal: 24, borderRadius: 10, justifyContent: 'center' },
+
+  progressBarBg: {
+    width: '100%', height: 6, borderRadius: 3,
+    backgroundColor: '#1E293B', marginTop: 16, overflow: 'hidden',
+  },
+  progressBarFill: {
+    height: '100%', borderRadius: 3,
+  },
 });

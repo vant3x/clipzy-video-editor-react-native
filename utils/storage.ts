@@ -33,6 +33,7 @@ export interface Project {
 }
 
 const PROJECTS_FILE = `${Paths.document.uri}projects.json`;
+const MAX_PROJECTS = 20;
 
 export const getProjects = async (): Promise<Project[]> => {
   try {
@@ -57,7 +58,7 @@ export const saveProject = async (project: Project): Promise<void> => {
   try {
     const projects = await getProjects();
     const existingIndex = projects.findIndex((p) => p.id === project.id);
-    
+
     project.updatedAt = Date.now();
 
     if (existingIndex >= 0) {
@@ -66,10 +67,11 @@ export const saveProject = async (project: Project): Promise<void> => {
       projects.push(project);
     }
 
-    // Sort by most recently updated
     projects.sort((a, b) => b.updatedAt - a.updatedAt);
-    
-    await writeAsStringAsync(PROJECTS_FILE, JSON.stringify(projects));
+
+    const trimmed = projects.slice(0, MAX_PROJECTS);
+
+    await writeAsStringAsync(PROJECTS_FILE, JSON.stringify(trimmed));
   } catch (error) {
     console.error('Error saving project:', error);
   }

@@ -20,7 +20,7 @@ export interface ClipInput {
 export interface EditOptions {
   speed?: number;
   color?: { brightness?: number; contrast?: number; saturation?: number };
-  resolution?: string; // e.g. '1920x1080', '3840x2160'
+  resolution?: string;
   fps?: number;
   transform?: {
     scale?: number;
@@ -32,13 +32,21 @@ export interface EditOptions {
     canvasHeight?: number;
   };
   musicUri?: string;
-  videoVolume?: number; // 0.0 to 1.0
-  musicVolume?: number; // 0.0 to 1.0
+  videoVolume?: number;
+  musicVolume?: number;
 }
 
-/**
- * Strips the 'file://' prefix from absolute URIs on Android, which FFmpeg cannot read.
- */
+export interface ExportProgress {
+  processedMs: number;
+  totalMs: number;
+  percent: number;
+}
+
+export interface FFmpegResult {
+  success: boolean;
+  error?: string;
+}
+
 const ensureRawPath = (uri: string): string => {
   if (uri.startsWith('file://')) {
     return uri.substring(7);
@@ -75,64 +83,101 @@ export const getVideoMetadata = async (uri: string): Promise<VideoMetadata | nul
   return null;
 };
 
-export const executeFFmpeg = async (command: string): Promise<boolean> => {
+export const executeFFmpeg = async (
+  command: string,
+  onProgress?: (progress: ExportProgress) => void
+): Promise<FFmpegResult> => {
   try {
     console.log(`Executing FFmpeg: ${command}`);
     const session = await FFmpegKit.execute(command);
     const returnCode = await session.getReturnCode();
     if (ReturnCode.isSuccess(returnCode)) {
       console.log('FFmpeg success.');
-      return true;
+      return { success: true };
     } else if (ReturnCode.isCancel(returnCode)) {
       console.log('FFmpeg cancelled.');
-      return false;
+      return { success: false, error: 'Export cancelled' };
     } else {
       const output = await session.getOutput();
+      const allLogs = await session.getAllLogsAsString();
       console.error('FFmpeg failed. Output:', output);
-      return false;
+      console.error('FFmpeg logs:', allLogs);
+      return { success: false, error: output || allLogs || 'Unknown FFmpeg error' };
     }
   } catch (error) {
     console.error('FFmpeg execution error:', error);
-    return false;
+    return { success: false, error: String(error) };
   }
 };
 
 export const generateThumbnails = async (uri: string, duration: number, count: number): Promise<string[]> => {
   const fps = Math.max(0.1, count / Math.max(duration, 1));
-  const outDirName = `thumbs_${Date.now()}`;
-  const outDirPath = `${Paths.cache.uri}${outDirName}/`;
+  const outDirPath = `${Paths.cache.uri}thumbs_current/`;
+
+  try {
+    const info = await FileSystem.getInfoAsync(outDirPath);
+    if (info.exists) {
+      await FileSystem.deleteAsync(outDirPath, { idempotent: true });
+    }
+  } catch {}
+
   await FileSystem.makeDirectoryAsync(outDirPath, { intermediates: true });
-  
+
   const rawInput = ensureRawPath(uri);
   const rawOutput = ensureRawPath(outDirPath);
-  
+
   const command = `-y -i "${rawInput}" -vf "fps=${fps},scale=120:-1" -q:v 2 "${rawOutput}thumb_%03d.jpg"`;
-  const success = await executeFFmpeg(command);
-  if (success) {
+  const result = await executeFFmpeg(command);
+  if (result.success) {
     const files = await FileSystem.readDirectoryAsync(outDirPath);
     return files.sort().map(f => `${outDirPath}${f}`);
   }
   return [];
 };
 
-/**
- * Build the video/audio filter chains from EditOptions.
- */
+function getTargetDimensions(targetRatio: string): { w: number; h: number } {
+  switch (targetRatio) {
+    case '16:9': return { w: 1920, h: 1080 };
+    case '9:16': return { w: 1080, h: 1920 };
+    case '1:1': return { w: 1080, h: 1080 };
+    default: return { w: 1920, h: 1080 };
+  }
+}
+
+function buildAtempoFilter(speed: number): string[] {
+  const filters: string[] = [];
+  let remaining = speed;
+
+  if (remaining >= 0.5 && remaining <= 2.0) {
+    filters.push(`atempo=${remaining.toFixed(4)}`);
+  } else if (remaining > 2.0) {
+    while (remaining > 2.0) {
+      filters.push('atempo=2.0');
+      remaining /= 2.0;
+    }
+    if (Math.abs(remaining - 1.0) > 0.01) {
+      filters.push(`atempo=${remaining.toFixed(4)}`);
+    }
+  } else {
+    while (remaining < 0.5) {
+      filters.push('atempo=0.5');
+      remaining /= 0.5;
+    }
+    if (Math.abs(remaining - 1.0) > 0.01) {
+      filters.push(`atempo=${remaining.toFixed(4)}`);
+    }
+  }
+
+  return filters;
+}
+
 function buildFilters(options: EditOptions): { videoFilters: string[]; audioFilters: string[] } {
   const videoFilters: string[] = [];
   const audioFilters: string[] = [];
 
   if (options.speed && options.speed !== 1.0) {
     videoFilters.push(`setpts=${(1.0 / options.speed).toFixed(4)}*PTS`);
-    // atempo is limited to [0.5, 2.0]; chain for extreme values
-    const s = options.speed;
-    if (s >= 0.5 && s <= 2.0) {
-      audioFilters.push(`atempo=${s}`);
-    } else if (s > 2.0) {
-      audioFilters.push(`atempo=2.0`, `atempo=${(s / 2.0).toFixed(4)}`);
-    } else {
-      audioFilters.push(`atempo=0.5`, `atempo=${(s / 0.5).toFixed(4)}`);
-    }
+    audioFilters.push(...buildAtempoFilter(options.speed));
   }
 
   if (options.color) {
@@ -172,17 +217,61 @@ function buildFilters(options: EditOptions): { videoFilters: string[]; audioFilt
   return { videoFilters, audioFilters };
 }
 
-/**
- * Process one or more video clips with optional per-clip trim, effects, and music mixing.
- * Accepts ClipInput[] (with per-clip trim), string[] or a single string.
- */
+function buildPerClipFilters(
+  options: EditOptions,
+  _srcWidth: number,
+  _srcHeight: number
+): string {
+  const targetRatio = options.transform?.targetRatio || 'Original';
+  const { w: targetW, h: targetH } = getTargetDimensions(targetRatio);
+  const parts: string[] = [];
+
+  const scale = options.transform?.scale ?? 1;
+  const rotation = options.transform?.rotation ?? 0;
+  const translateX = options.transform?.translateX ?? 0;
+  const translateY = options.transform?.translateY ?? 0;
+  const canvasWidth = options.transform?.canvasWidth ?? 1;
+  const canvasHeight = options.transform?.canvasHeight ?? 1;
+
+  if (Math.abs(rotation) > 0.01) {
+    parts.push(`rotate=${rotation}:c=black:ow='rotw(${rotation})':oh='roth(${rotation})'`);
+  }
+  if (Math.abs(scale - 1) > 0.01) {
+    parts.push(`scale=iw*${scale}:ih*${scale}`);
+  }
+
+  parts.push(
+    `scale=${targetW}:${targetH}:force_original_aspect_ratio=decrease,` +
+    `pad=${targetW}:${targetH}:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1`
+  );
+
+  if (Math.abs(translateX) > 1 || Math.abs(translateY) > 1) {
+    const normX = translateX / canvasWidth;
+    const normY = translateY / canvasHeight;
+    parts.push(
+      `crop=w='${targetW}':h='${targetH}':x='(iw-ow)/2+(${normX}*ow)':y='(ih-oh)/2+(${normY}*oh)'`
+    );
+  }
+
+  if (options.color) {
+    const { brightness = 0, contrast = 1, saturation = 1 } = options.color;
+    parts.push(`eq=brightness=${brightness}:contrast=${contrast}:saturation=${saturation}`);
+  }
+
+  if (options.speed && options.speed !== 1.0) {
+    parts.push(`setpts=${(1.0 / options.speed).toFixed(4)}*PTS`);
+  }
+
+  return parts.join(',');
+}
+
 export const processVideo = async (
   inputUris: ClipInput[] | string[] | string,
   outputUri: string,
-  options: EditOptions
-): Promise<boolean> => {
+  options: EditOptions,
+  onProgress?: (progress: ExportProgress) => void
+): Promise<FFmpegResult> => {
 
-  // Normalize to ClipInput[]
   let clips: ClipInput[];
   if (typeof inputUris === 'string') {
     clips = [{ uri: inputUris }];
@@ -193,10 +282,8 @@ export const processVideo = async (
   }
 
   const isMultiClip = clips.length > 1;
-  const musicIndex = clips.length; // music input index (after all video clips)
-  const { videoFilters, audioFilters } = buildFilters(options);
+  const musicIndex = clips.length;
 
-  // Build -i input string with per-clip trim as input options, stripping file://
   const inputParts: string[] = clips.map(clip => {
     const trimOpt = clip.trim ? `-ss ${clip.trim.start.toFixed(3)} -to ${clip.trim.end.toFixed(3)}` : '';
     const rawPath = ensureRawPath(clip.uri);
@@ -210,57 +297,44 @@ export const processVideo = async (
 
   let filterComplex = '';
   let mapArgs = '';
-  let extraOutputOpts = '';
 
   if (isMultiClip) {
-    // ── Multi-clip path ──────────────────────────────────────────────────────
-    // Scale and pad every clip to standard 1080x1920 portrait.
-    // Concat requires same resolution, framerate, and audio layout.
-    // We standardize audio with aresample=44100 and aformat=channel_layouts=stereo.
     let scaleFilters = '';
     let concatParts = '';
 
     for (let i = 0; i < clips.length; i++) {
-      // Video: scale + pad to 1080x1920 (portrait default), preserve AR
-      scaleFilters += `[${i}:v]scale=1080:1920:force_original_aspect_ratio=decrease,` +
-        `pad=1080:1920:(ow-iw)/2:(oh-ih)/2,setsar=1[sv${i}];`;
-      
-      // Calculate active duration for silence track limit
+      const clipFilters = buildPerClipFilters(options, 1920, 1080);
+      scaleFilters += `[${i}:v]${clipFilters}[sv${i}];`;
+
       let segmentDuration = clips[i].duration || 0;
       if (clips[i].trim) {
         segmentDuration = clips[i].trim!.end - clips[i].trim!.start;
       }
       if (segmentDuration <= 0) segmentDuration = 5.0;
 
-      // Audio: generate silent track if clip lacks audio, otherwise standardise audio formats
       if (clips[i].hasAudio === false) {
         scaleFilters += `anullsrc=channel_layout=stereo:sample_rate=44100:d=${segmentDuration.toFixed(3)}[sa${i}];`;
       } else {
-        scaleFilters += `[${i}:a]aresample=44100,aformat=sample_fmts=fltp:channel_layouts=stereo[sa${i}];`;
+        const clipAudioFilters: string[] = [];
+        if (options.speed && options.speed !== 1.0) {
+          clipAudioFilters.push(...buildAtempoFilter(options.speed));
+        }
+        if (clipAudioFilters.length > 0) {
+          scaleFilters += `[${i}:a]${clipAudioFilters.join(',')}aresample=44100,aformat=sample_fmts=fltp:channel_layouts=stereo[sa${i}];`;
+        } else {
+          scaleFilters += `[${i}:a]aresample=44100,aformat=sample_fmts=fltp:channel_layouts=stereo[sa${i}];`;
+        }
       }
       concatParts += `[sv${i}][sa${i}]`;
     }
 
     const concatFilter = `${concatParts}concat=n=${clips.length}:v=1:a=1[cv][ca]`;
 
-    const vFilterStr = videoFilters.length > 0
-      ? `;[cv]${videoFilters.join(',')}[vout]`
-      : `;[cv]copy[vout]`;
-
     let aFilterStr = '';
-    if (audioFilters.length > 0) {
-      aFilterStr = `;[ca]${audioFilters.join(',')}`;
-      if (options.videoVolume !== undefined && options.videoVolume !== 1.0) {
-        aFilterStr += `,volume=${options.videoVolume.toFixed(2)}[a0]`;
-      } else {
-        aFilterStr += `[a0]`;
-      }
+    if (options.videoVolume !== undefined && options.videoVolume !== 1.0) {
+      aFilterStr = `;[ca]volume=${options.videoVolume.toFixed(2)}[a0]`;
     } else {
-      if (options.videoVolume !== undefined && options.videoVolume !== 1.0) {
-        aFilterStr = `;[ca]volume=${options.videoVolume.toFixed(2)}[a0]`;
-      } else {
-        aFilterStr = `;[ca]anull[a0]`;
-      }
+      aFilterStr = `;[ca]anull[a0]`;
     }
 
     if (options.musicUri) {
@@ -270,19 +344,19 @@ export const processVideo = async (
         musicAudio = '[mus0]';
       }
       const amix = `;[a0]${musicAudio}amix=inputs=2:duration=first:dropout_transition=2[aout]`;
-      filterComplex = `-filter_complex "${scaleFilters}${concatFilter}${vFilterStr}${aFilterStr}${amix}"`;
-      mapArgs = `-map "[vout]" -map "[aout]"`;
+      filterComplex = `-filter_complex "${scaleFilters}${concatFilter}${aFilterStr}${amix}"`;
+      mapArgs = `-map "[cv]" -map "[aout]"`;
     } else {
-      filterComplex = `-filter_complex "${scaleFilters}${concatFilter}${vFilterStr}${aFilterStr}"`;
+      filterComplex = `-filter_complex "${scaleFilters}${concatFilter};[cv]copy[vout]${aFilterStr}"`;
       mapArgs = `-map "[vout]" -map "[a0]"`;
     }
 
-  } else if (videoFilters.length > 0 || audioFilters.length > 0 || options.musicUri) {
-    // ── Single clip with filters / music ────────────────────────────────────
+  } else if (options.speed !== undefined || options.color || options.transform || options.musicUri) {
+    const { videoFilters, audioFilters } = buildFilters(options);
     let filterParts = '';
     let vMapSrc = '0:v';
     let aMapSrc = '0:a';
-    
+
     const hasAudio = clips[0].hasAudio !== false;
     let segmentDuration = clips[0].duration || 0;
     if (clips[0].trim) {
@@ -332,7 +406,7 @@ export const processVideo = async (
       if (filterParts.endsWith(';')) filterParts = filterParts.slice(0, -1);
       filterComplex = `-filter_complex "${filterParts}"`;
     }
-    
+
     if (!hasAudio && !options.musicUri && audioFilters.length === 0) {
       mapArgs = `-map ${vMapSrc}`;
     } else {
@@ -340,8 +414,6 @@ export const processVideo = async (
     }
 
   } else {
-    // ── Single clip, no filters, no music ───────────────────────────────────
-    // Just re-encode (trim already applied as input options above)
     if (clips[0].hasAudio === false) {
       mapArgs = `-map 0:v`;
     } else {
@@ -349,17 +421,15 @@ export const processVideo = async (
     }
   }
 
-  // Output codec options
   let outputOptions = `-c:v libx264 -preset fast -crf 23`;
   if (options.resolution) outputOptions += ` -s ${options.resolution}`;
   if (options.fps) outputOptions += ` -r ${options.fps}`;
-  outputOptions += ` -c:a aac -b:a 128k${extraOutputOpts}`;
+  outputOptions += ` -c:a aac -b:a 128k`;
 
-  // Assemble final command (-y at the start, only once), stripping file:// from output
   const rawOutput = ensureRawPath(outputUri);
   const finalCommand = `-y ${inputStr} ${filterComplex} ${mapArgs} ${outputOptions} "${rawOutput}"`
     .replace(/\s+/g, ' ')
     .trim();
 
-  return executeFFmpeg(finalCommand);
+  return executeFFmpeg(finalCommand, onProgress);
 };

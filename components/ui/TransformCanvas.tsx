@@ -188,14 +188,16 @@ export function TransformCanvas({
           </Animated.View>
         </GestureDetector>
         
-        {/* Brightness Preview Overlay */}
+        {/* Brightness Preview Overlay - improved approximation */}
         {brightness !== undefined && Math.abs(brightness) > 0.01 && (
           <View 
             style={[
               StyleSheet.absoluteFillObject,
               { 
                 backgroundColor: brightness > 0 ? '#FFFFFF' : '#000000',
-                opacity: brightness > 0 ? brightness * 0.45 : Math.abs(brightness) * 0.75
+                opacity: brightness > 0
+                  ? Math.min(0.55, brightness * 0.6)
+                  : Math.min(0.85, Math.abs(brightness) * 0.9)
               }
             ]} 
             pointerEvents="none"
